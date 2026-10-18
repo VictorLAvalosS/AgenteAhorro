@@ -1,77 +1,11 @@
 import { useState, useEffect } from "react";
-import robotImg from "@/imports/image.png";
 import { supabase } from "./lib/supabase";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-type Tab = "inicio" | "gastos" | "hogar" | "prestamos" | "metas" | "asistente";
-type Moneda = "Bs" | "USD";
-
-interface Gasto {
-  id: string;
-  fecha: string;
-  categoria: string;
-  descripcion: string;
-  monto: number;
-  tipo: "gasto" | "ingreso";
-  moneda: Moneda;
-}
-
-interface Prestamo {
-  id: string;
-  deudor: string;
-  capital: number;
-  interes: number;
-  fechaInicio: string;
-  cuotas: number;
-  cuotasPagadas: number;
-  estado: "activo" | "pagado";
-  moneda: Moneda;
-}
-
-interface Meta {
-  id: string;
-  nombre: string;
-  emoji: string;
-  meta: number;
-  ahorrado: number;
-  color: string;
-  moneda: Moneda;
-}
-
-interface GastoHogar {
-  id: string;
-  fecha: string;
-  descripcion: string;
-  monto: number;
-  categoria: "limpieza" | "comida" | "mascotas" | "servicios" | "otro";
-  dividir: boolean;
-  hermanos: number;
-  pagadoPor: string;
-  moneda: Moneda;
-}
-
-interface ChatMsg {
-  id: number;
-  role: "user" | "bot";
-  text: string;
-}
-
-interface Evento {
-  id: number;
-  dia: string;
-  hora: string;
-  titulo: string;
-  tipo: "trabajo" | "estudio" | "salud" | "otro";
-}
-
-// ─── Initial Data ─────────────────────────────────────────────────────────────
-
-const eventosIniciales: Evento[] = [
-  { id: 1, dia: "Lunes", hora: "08:00", titulo: "Taller — turno mañana", tipo: "trabajo" },
-  { id: 2, dia: "Lunes", hora: "18:00", titulo: "Clases — Matemáticas", tipo: "estudio" },
-];
+import { Tab, Moneda, Gasto, Prestamo, Meta, GastoHogar, ChatMsg } from "./lib/types";
+import { Hermano, HERMANOS_DEFAULT, calcularCuotaDivision, formatearMontoDivision } from "./lib/hermanos";
+import { calcularDetallesPrestamo } from "./lib/prestamos";
+import HogarTab from "./components/HogarTab";
+import PrestamosTab from "./components/PrestamosTab";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -79,11 +13,7 @@ const CATS_GASTO = ["Taller", "Comida", "Transporte", "Estudios", "Salud", "Pré
 
 function fmt(n: number, mon: Moneda = "Bs") {
   const symbol = mon === "Bs" ? "Bs" : "$";
-  return symbol + " " + n.toLocaleString("es-AR", { maximumFractionDigits: 2 });
-}
-
-function cuotaConInteres(capital: number, interesPct: number) {
-  return capital + (capital * interesPct) / 100;
+  return symbol + " " + n.toLocaleString("es-BO", { maximumFractionDigits: 2 });
 }
 
 function catEmoji(cat: string): string {
@@ -123,7 +53,7 @@ function RobotAvatar({ size = 80 }: { size?: number }) {
   );
 }
 
-// ─── Components ───────────────────────────────────────────────────────────────
+// ─── Progress Bar ─────────────────────────────────────────────────────────────
 
 function ProgressBar({ value, max, color }: { value: number; max: number; color: string }) {
   const pct = Math.min(100, max > 0 ? (value / max) * 100 : 0);
@@ -148,9 +78,9 @@ function Login({ onLogin }: { onLogin: (usuario: { id: string, nombre: string, e
     
     // Check if user exists
     const { data: existingUser } = await supabase
-      .from('usuarios')
-      .select('*')
-      .eq('email', email.trim())
+      .from("usuarios")
+      .select("*")
+      .eq("email", email.trim())
       .single();
 
     if (existingUser) {
@@ -158,7 +88,7 @@ function Login({ onLogin }: { onLogin: (usuario: { id: string, nombre: string, e
     } else {
       // Create new user
       const { data: newUser, error } = await supabase
-        .from('usuarios')
+        .from("usuarios")
         .insert([{ nombre: nombre.trim(), email: email.trim() }])
         .select()
         .single();
@@ -182,7 +112,7 @@ function Login({ onLogin }: { onLogin: (usuario: { id: string, nombre: string, e
             Hola! Soy <span className="text-[#f59e0b]">AHORRO</span>
           </h1>
           <p className="text-[#8b949e] text-sm leading-relaxed mb-8">
-            Tu agente personal de finanzas. Te ayudo a organizar tu plata, tus préstamos, tus gastos de casa y mucho más.
+            Tu agente personal de finanzas. Te ayudo a organizar tus préstamos con intereses, gastos de casa con tus hermanos y tus metas.
           </p>
           <div className="flex flex-col gap-3 w-full">
             <button onClick={() => setStep("form")} className="w-full py-4 rounded-2xl bg-[#f59e0b] text-[#0d1117] font-display font-bold text-base hover:bg-[#fbbf24] transition-all shadow-lg">
@@ -210,27 +140,57 @@ function Login({ onLogin }: { onLogin: (usuario: { id: string, nombre: string, e
 
 // ─── INICIO ───────────────────────────────────────────────────────────────────
 
-function Inicio({ gastos, prestamos, metas, hogar, nombre }: {
-  gastos: Gasto[]; prestamos: Prestamo[]; metas: Meta[]; hogar: GastoHogar[]; nombre: string;
+function Inicio({
+  gastos,
+  prestamos,
+  metas,
+  hogar,
+  hermanos,
+  nombre,
+  onNavigateTab,
+}: {
+  gastos: Gasto[];
+  prestamos: Prestamo[];
+  metas: Meta[];
+  hogar: GastoHogar[];
+  hermanos: Hermano[];
+  nombre: string;
+  onNavigateTab: (tab: Tab) => void;
 }) {
   const calc = (moneda: Moneda) => {
     const ingresos = gastos.filter(g => g.tipo === "ingreso" && g.moneda === moneda).reduce((s, g) => s + g.monto, 0);
     const egresos = gastos.filter(g => g.tipo === "gasto" && g.moneda === moneda).reduce((s, g) => s + g.monto, 0);
     const balance = ingresos - egresos;
     
+    // Por cobrar préstamos (calculado con intereses y penalizaciones pendientes)
     const prestamosActivos = prestamos.filter(p => p.estado === "activo" && p.moneda === moneda);
     const porCobrar = prestamosActivos.reduce((s, p) => {
-      const total = cuotaConInteres(p.capital, p.interes);
-      const cuota = total / p.cuotas;
-      return s + cuota * (p.cuotas - p.cuotasPagadas);
+      const det = calcularDetallesPrestamo(p);
+      return s + det.saldoPendiente;
     }, 0);
     
-    const debeHermanos = hogar.filter(g => g.dividir && g.moneda === moneda).reduce((s, g) => s + (g.monto / (g.hermanos + 1)) * g.hermanos, 0);
+    // Cálculo exacto de deudas de hermanos
+    const debeHermanos = hogar.filter(g => g.dividir && g.moneda === moneda && (g.pagadoPor === "Yo" || g.pagadoPor === nombre)).reduce((s, g) => {
+      const totalP = (g.hermanos || 2) + 1;
+      const cuota = g.cuotaPorPersona ?? calcularCuotaDivision(g.monto, totalP, g.moneda).cuotaFinal;
+      const nombres = g.hermanosNombres && g.hermanosNombres.length > 0
+        ? g.hermanosNombres
+        : hermanos.slice(0, g.hermanos || 2).map(h => h.nombre);
+      const pendientes = nombres.filter(nom => !(g.pagosRegistrados?.[nom] ?? false)).length;
+      return s + (cuota * pendientes);
+    }, 0);
+
     return { ingresos, egresos, balance, porCobrar, debeHermanos };
   };
 
   const bs = calc("Bs");
   const usd = calc("USD");
+
+  const fechaHoy = new Date().toLocaleDateString("es-BO", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+  });
 
   return (
     <div className="space-y-5 pb-4">
@@ -238,7 +198,7 @@ function Inicio({ gastos, prestamos, metas, hogar, nombre }: {
         <RobotAvatar size={44} />
         <div>
           <p className="font-display font-bold text-[#e6edf3]">¡Hola, {nombre}! 👋</p>
-          <p className="text-xs text-[#8b949e]">Miércoles 16 de septiembre</p>
+          <p className="text-xs text-[#8b949e] capitalize">{fechaHoy}</p>
         </div>
       </div>
 
@@ -260,15 +220,33 @@ function Inicio({ gastos, prestamos, metas, hogar, nombre }: {
           <p className="font-mono text-md font-bold text-[#ef4444]">{fmt(bs.egresos, "Bs")}</p>
           <p className="font-mono text-xs text-[#ef4444]/80">{fmt(usd.egresos, "USD")}</p>
         </div>
-        <div className="rounded-xl p-4 bg-[#134e4a]/40 border border-[#14b8a6]/20">
-          <p className="text-xs text-[#8b949e] font-display uppercase mb-1">Por cobrar</p>
+        <div
+          onClick={() => onNavigateTab("prestamos")}
+          className="rounded-xl p-4 bg-[#134e4a]/40 border border-[#14b8a6]/20 hover:border-[#14b8a6] cursor-pointer transition-all group"
+        >
+          <div className="flex items-center justify-between mb-1">
+            <p className="text-xs text-[#8b949e] font-display uppercase">Por cobrar</p>
+            <span className="text-[10px] text-[#14b8a6] group-hover:translate-x-0.5 transition-transform">Ver →</span>
+          </div>
           <p className="font-mono text-md font-bold text-[#14b8a6]">{fmt(bs.porCobrar, "Bs")}</p>
           <p className="font-mono text-xs text-[#14b8a6]/80">{fmt(usd.porCobrar, "USD")}</p>
+          <p className="text-[10px] text-[#8b949e] mt-1">
+            {prestamos.filter(p => p.estado === "activo").length} préstamos activos
+          </p>
         </div>
-        <div className="rounded-xl p-4 bg-[#4a1d96]/40 border border-[#a855f7]/20">
-          <p className="text-xs text-[#8b949e] font-display uppercase mb-1">Me deben (Hogar)</p>
+        <div
+          onClick={() => onNavigateTab("hogar")}
+          className="rounded-xl p-4 bg-[#4a1d96]/40 border border-[#a855f7]/30 hover:border-[#a855f7] cursor-pointer transition-all group"
+        >
+          <div className="flex items-center justify-between mb-1">
+            <p className="text-xs text-[#8b949e] font-display uppercase">Me deben (Hogar)</p>
+            <span className="text-[10px] text-[#a855f7] group-hover:translate-x-0.5 transition-transform">Ver →</span>
+          </div>
           <p className="font-mono text-md font-bold text-[#a855f7]">{fmt(bs.debeHermanos, "Bs")}</p>
           <p className="font-mono text-xs text-[#a855f7]/80">{fmt(usd.debeHermanos, "USD")}</p>
+          <p className="text-[10px] text-[#8b949e] mt-1 truncate">
+            {hermanos.length > 0 ? `${hermanos.map(h => h.nombre).join(", ")}` : "Sin hermanos"}
+          </p>
         </div>
       </div>
 
@@ -373,224 +351,6 @@ function Gastos({ gastos, onAdd, onDelete }: { gastos: Gasto[]; onAdd: (g: Parti
   );
 }
 
-// ─── HOGAR ────────────────────────────────────────────────────────────────────
-
-const CATS_HOGAR: { val: GastoHogar["categoria"]; label: string }[] = [
-  { val: "limpieza", label: "Limpieza" },
-  { val: "comida", label: "Alimentos" },
-  { val: "mascotas", label: "Mascotas 🐕" },
-  { val: "servicios", label: "Servicios" },
-  { val: "otro", label: "Otro" },
-];
-
-function Hogar({ hogar, onAdd, onDelete }: { hogar: GastoHogar[]; onAdd: (g: Partial<GastoHogar>) => void; onDelete: (id: string) => void }) {
-  const [seccion, setSeccion] = useState<"todos" | "mascotas" | "divididos">("todos");
-  const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState<{
-    descripcion: string; monto: string; categoria: GastoHogar["categoria"];
-    dividir: boolean; hermanos: number; fecha: string; moneda: Moneda;
-  }>({ descripcion: "", monto: "", categoria: "comida", dividir: true, hermanos: 2, fecha: new Date().toISOString().slice(0, 10), moneda: "Bs" });
-
-  const lista = hogar.filter(g => seccion === "todos" ? true : seccion === "mascotas" ? g.categoria === "mascotas" : g.dividir).sort((a,b) => new Date(b.fecha).getTime() - new Date(a.fecha).getTime());
-
-  function agregar() {
-    if (!form.descripcion || !form.monto) return;
-    onAdd({ ...form, monto: parseFloat(form.monto), pagadoPor: "Yo" });
-    setForm({ ...form, descripcion: "", monto: "" });
-    setShowForm(false);
-  }
-
-  return (
-    <div className="space-y-4 pb-4">
-      <div className="flex gap-2">
-        {([ { val: "todos", label: "Todos" }, { val: "divididos", label: "Con hermanos" }, { val: "mascotas", label: "🐕 Perritos" } ] as const).map(f => (
-          <button key={f.val} onClick={() => setSeccion(f.val)} className={`flex-1 py-2 rounded-lg text-xs font-display font-semibold transition-all ${seccion === f.val ? "bg-[#f59e0b] text-[#0d1117]" : "bg-[#161b22] text-[#8b949e] border border-[#30363d]"}`}>
-            {f.label}
-          </button>
-        ))}
-      </div>
-
-      <button onClick={() => setShowForm(!showForm)} className="w-full py-3 rounded-xl bg-[#a855f7] text-white font-display font-bold text-sm hover:bg-[#c084fc] transition-colors">
-        {showForm ? "✕ Cancelar" : "+ Agregar compra del hogar"}
-      </button>
-
-      {showForm && (
-        <div className="rounded-xl p-4 bg-[#161b22] border border-[#30363d] space-y-3">
-          <p className="text-sm font-display font-semibold text-[#e6edf3]">Nueva compra del hogar</p>
-          <input type="text" placeholder="Ej: Arroz 5kg, Shampú..." value={form.descripcion} onChange={e => setForm(f => ({ ...f, descripcion: e.target.value }))} className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-2 text-sm text-[#e6edf3] placeholder:text-[#8b949e] outline-none focus:border-[#a855f7]" />
-          <div className="flex gap-2">
-            <input type="number" placeholder="Monto total" value={form.monto} onChange={e => setForm(f => ({ ...f, monto: e.target.value }))} className="flex-1 bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-2 text-sm font-mono text-[#e6edf3] placeholder:text-[#8b949e] outline-none focus:border-[#a855f7]" />
-            <select value={form.moneda} onChange={e => setForm(f => ({ ...f, moneda: e.target.value as Moneda }))} className="w-24 bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-2 text-sm text-[#e6edf3] outline-none focus:border-[#a855f7]">
-                <option value="Bs">Bs</option>
-                <option value="USD">USD</option>
-             </select>
-          </div>
-
-          <div className="grid grid-cols-2 gap-2">
-            {CATS_HOGAR.map(c => (
-              <button key={c.val} onClick={() => setForm(f => ({ ...f, categoria: c.val }))} className={`py-2 rounded-lg text-xs font-semibold transition-all ${form.categoria === c.val ? "bg-[#a855f7] text-white" : "bg-[#0d1117] border border-[#30363d] text-[#8b949e]"}`}>
-                {catEmoji(c.val)} {c.label}
-              </button>
-            ))}
-          </div>
-
-          <div className="rounded-xl p-3 bg-[#0d1117] border border-[#30363d] space-y-3">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-[#e6edf3]">¿Dividir con hermanos?</p>
-              </div>
-              <button onClick={() => setForm(f => ({ ...f, dividir: !f.dividir }))} className={`w-12 h-6 rounded-full transition-all relative ${form.dividir ? "bg-[#a855f7]" : "bg-[#30363d]"}`}>
-                <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all ${form.dividir ? "left-6" : "left-0.5"}`} />
-              </button>
-            </div>
-            {form.dividir && (
-              <div>
-                <p className="text-xs text-[#8b949e] mb-2">¿Cuántos hermanos comparten?</p>
-                <div className="flex gap-2">
-                  {[1, 2, 3, 4].map(n => (
-                    <button key={n} onClick={() => setForm(f => ({ ...f, hermanos: n }))} className={`flex-1 py-2 rounded-lg text-xs font-mono font-bold transition-all ${form.hermanos === n ? "bg-[#a855f7] text-white" : "bg-[#161b22] border border-[#30363d] text-[#8b949e]"}`}>
-                      {n}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-          <button onClick={agregar} className="w-full py-2.5 rounded-lg bg-[#a855f7] text-white font-display font-bold text-sm hover:bg-[#c084fc] transition-colors">Guardar compra</button>
-        </div>
-      )}
-
-      <div className="space-y-2">
-        {lista.map(g => {
-          const miParte = g.dividir ? g.monto / (g.hermanos + 1) : g.monto;
-          const debenEllos = g.dividir ? (g.monto / (g.hermanos + 1)) * g.hermanos : 0;
-          return (
-            <div key={g.id} className="rounded-xl p-4 bg-[#161b22] border border-[#30363d]">
-              <div className="flex items-start justify-between mb-2">
-                <div className="flex items-center gap-2 flex-1 min-w-0">
-                  <span className="text-lg flex-shrink-0">{catEmoji(g.categoria)}</span>
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium text-[#e6edf3] truncate">{g.descripcion}</p>
-                    <p className="text-xs text-[#8b949e]">{CATS_HOGAR.find(c => c.val === g.categoria)?.label} · {g.fecha.slice(5).replace("-", "/")}</p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2 flex-shrink-0">
-                  <span className="font-mono text-sm font-bold text-[#e6edf3]">{fmt(g.monto, g.moneda)}</span>
-                  <button onClick={() => onDelete(g.id)} className="text-[#30363d] hover:text-[#ef4444] transition-colors">✕</button>
-                </div>
-              </div>
-              {g.dividir ? (
-                <div className="flex gap-2 mt-2">
-                  <span className="text-xs px-2 py-1 rounded-lg bg-[#78350f]/40 border border-[#f59e0b]/20 text-[#f59e0b] font-mono">
-                    Yo: {fmt(miParte, g.moneda)}
-                  </span>
-                  <span className="text-xs px-2 py-1 rounded-lg bg-[#4a1d96]/40 border border-[#a855f7]/20 text-[#a855f7] font-mono">
-                    {g.hermanos} herm. deben: {fmt(debenEllos, g.moneda)}
-                  </span>
-                </div>
-              ) : (
-                <span className="text-xs px-2 py-1 rounded-lg bg-[#161b22] border border-[#30363d] text-[#8b949e]">Solo mío</span>
-              )}
-            </div>
-          );
-        })}
-        {lista.length === 0 && <p className="text-xs text-center text-[#8b949e] mt-4">No hay gastos del hogar.</p>}
-      </div>
-    </div>
-  );
-}
-
-// ─── PRÉSTAMOS ────────────────────────────────────────────────────────────────
-
-function Prestamos({ prestamos, onAdd, onUpdate, onDelete }: { prestamos: Prestamo[]; onAdd: (g: Partial<Prestamo>) => void; onUpdate: (id: string, updates: Partial<Prestamo>) => void; onDelete: (id: string) => void }) {
-  const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ deudor: "", capital: "", interes: "8", cuotas: "2", fechaInicio: new Date().toISOString().slice(0, 10), moneda: "Bs" as Moneda });
-
-  function agregar() {
-    if (!form.deudor || !form.capital) return;
-    onAdd({
-      deudor: form.deudor, capital: parseFloat(form.capital), interes: parseFloat(form.interes),
-      fechaInicio: form.fechaInicio, cuotas: parseInt(form.cuotas), cuotasPagadas: 0, estado: "activo", moneda: form.moneda
-    });
-    setForm({ ...form, deudor: "", capital: "" });
-    setShowForm(false);
-  }
-
-  function pagarCuota(p: Prestamo) {
-    const nuevas = p.cuotasPagadas + 1;
-    onUpdate(p.id, { cuotasPagadas: nuevas, estado: nuevas >= p.cuotas ? "pagado" : "activo" });
-  }
-
-  const activos = prestamos.filter(p => p.estado === "activo");
-  const pagados = prestamos.filter(p => p.estado === "pagado");
-
-  return (
-    <div className="space-y-4 pb-4">
-      <button onClick={() => setShowForm(!showForm)} className="w-full py-3 rounded-xl bg-[#14b8a6] text-[#0d1117] font-display font-bold text-sm hover:bg-[#2dd4bf] transition-colors">
-        {showForm ? "✕ Cancelar" : "+ Nuevo préstamo"}
-      </button>
-
-      {showForm && (
-        <div className="rounded-xl p-4 bg-[#161b22] border border-[#30363d] space-y-3">
-          <input type="text" placeholder="Nombre del deudor" value={form.deudor} onChange={e => setForm(f => ({ ...f, deudor: e.target.value }))} className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-2 text-sm text-[#e6edf3] placeholder:text-[#8b949e] outline-none focus:border-[#14b8a6]" />
-          <div className="grid grid-cols-3 gap-2">
-            <input type="number" placeholder="Capital" value={form.capital} onChange={e => setForm(f => ({ ...f, capital: e.target.value }))} className="col-span-2 bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-2 text-sm font-mono text-[#e6edf3] placeholder:text-[#8b949e] outline-none focus:border-[#14b8a6]" />
-            <select value={form.moneda} onChange={e => setForm(f => ({ ...f, moneda: e.target.value as Moneda }))} className="bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-2 text-sm text-[#e6edf3] outline-none focus:border-[#14b8a6]">
-                <option value="Bs">Bs</option>
-                <option value="USD">USD</option>
-            </select>
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            <input type="number" placeholder="Interés %" value={form.interes} onChange={e => setForm(f => ({ ...f, interes: e.target.value }))} className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-2 text-sm font-mono text-[#e6edf3] placeholder:text-[#8b949e] outline-none focus:border-[#14b8a6]" />
-            <select value={form.cuotas} onChange={e => setForm(f => ({ ...f, cuotas: e.target.value }))} className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-2 text-sm text-[#e6edf3] outline-none">
-                {[1, 2, 3, 4, 6, 12].map(n => <option key={n} value={n}>{n} cuota{n > 1 ? "s" : ""}</option>)}
-            </select>
-          </div>
-          <button onClick={agregar} className="w-full py-2.5 rounded-lg bg-[#14b8a6] text-[#0d1117] font-display font-bold text-sm hover:bg-[#2dd4bf] transition-colors">Guardar préstamo</button>
-        </div>
-      )}
-
-      {activos.length > 0 && (
-        <div>
-          <p className="text-xs font-display font-semibold text-[#8b949e] uppercase tracking-wider mb-2">Activos</p>
-          <div className="space-y-3">
-            {activos.map(p => {
-              const total = cuotaConInteres(p.capital, p.interes);
-              const cuotaVal = total / p.cuotas;
-              return (
-                <div key={p.id} className="rounded-xl p-4 bg-[#161b22] border border-[#30363d]">
-                  <div className="flex justify-between items-start mb-3">
-                    <div>
-                      <p className="font-display font-semibold text-[#e6edf3]">{p.deudor}</p>
-                      <p className="text-xs text-[#8b949e]">Capital: {fmt(p.capital, p.moneda)} · {p.interes}% int.</p>
-                    </div>
-                    <button onClick={() => onDelete(p.id)} className="text-[#30363d] hover:text-red-500 text-xs">✕</button>
-                  </div>
-                  <div className="grid grid-cols-3 gap-2 mb-3 text-center">
-                    <div className="rounded-lg p-2 bg-[#0d1117]">
-                      <p className="font-mono text-xs text-[#14b8a6] font-semibold">{fmt(cuotaVal, p.moneda)}</p>
-                      <p className="text-[10px] text-[#8b949e]">por cuota</p>
-                    </div>
-                    <div className="rounded-lg p-2 bg-[#0d1117]">
-                      <p className="font-mono text-xs text-[#f59e0b] font-semibold">{p.cuotasPagadas}/{p.cuotas}</p>
-                      <p className="text-[10px] text-[#8b949e]">pagadas</p>
-                    </div>
-                  </div>
-                  <ProgressBar value={p.cuotasPagadas} max={p.cuotas} color="#14b8a6" />
-                  <button onClick={() => pagarCuota(p)} className="w-full mt-3 py-2 rounded-lg bg-[#134e4a] text-[#14b8a6] text-xs font-semibold hover:bg-[#14b8a6] hover:text-[#0d1117] transition-all">
-                    Registrar cuota pagada ✓
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-      {activos.length === 0 && pagados.length === 0 && <p className="text-xs text-center text-[#8b949e] mt-4">No hay préstamos activos.</p>}
-    </div>
-  );
-}
-
 // ─── METAS ────────────────────────────────────────────────────────────────────
 
 function Metas({ metas, onAdd, onUpdate, onDelete }: { metas: Meta[]; onAdd: (g: Partial<Meta>) => void; onUpdate: (id: string, updates: Partial<Meta>) => void; onDelete: (id: string) => void }) {
@@ -684,13 +444,25 @@ function Metas({ metas, onAdd, onUpdate, onDelete }: { metas: Meta[]; onAdd: (g:
 
 // ─── ASISTENTE ────────────────────────────────────────────────────────────────
 
-function Asistente({ nombre, gastos, prestamos, metas, hogar }: {
-  nombre: string; gastos: Gasto[]; prestamos: Prestamo[]; metas: Meta[]; hogar: GastoHogar[];
+function Asistente({
+  nombre,
+  gastos,
+  prestamos,
+  metas,
+  hogar,
+  hermanos,
+}: {
+  nombre: string;
+  gastos: Gasto[];
+  prestamos: Prestamo[];
+  metas: Meta[];
+  hogar: GastoHogar[];
+  hermanos: Hermano[];
 }) {
   const [msgs, setMsgs] = useState<ChatMsg[]>([
     {
       id: 0, role: "bot",
-      text: `¡Hola ${nombre}! 👋 Soy AHORRO, tu agente personal. Estoy conectado a la IA de Gemini. Preguntame lo que quieras sobre tus finanzas en Bs y Dólares.`,
+      text: `¡Hola ${nombre}! 👋 Soy AHORRO, tu agente financiero personal con IA. Preguntame lo que quieras sobre tus préstamos con intereses, penalizaciones por mora o los gastos compartidos con tus hermanos.`,
     },
   ]);
   const [input, setInput] = useState("");
@@ -710,14 +482,47 @@ function Asistente({ nombre, gastos, prestamos, metas, hogar }: {
       const genAI = new GoogleGenerativeAI(apiKey);
       const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
+      const prestamosInfo = prestamos.map(p => {
+        const det = calcularDetallesPrestamo(p);
+        return {
+          deudor: p.deudor,
+          capital: `${p.moneda} ${p.capital}`,
+          interesMensual: `${p.interes}%`,
+          modalidad: p.metodoPago === "solo_interes_capital_final"
+            ? "Paga solo interés mensual y devuelve todo el capital al final"
+            : "Paga capital + interés en cuotas mensuales",
+          saldoTotalPendiente: `${p.moneda} ${det.saldoPendiente}`,
+          totalCobradoHastaAhora: `${p.moneda} ${det.totalCobrado}`,
+          cuotas: `${det.cuotasPagadasCount} de ${det.totalCuotas} pagadas`,
+          fechaFinalAcordada: det.fechaFinal,
+          proximoCobro: det.proximaCuota
+            ? `Cuota #${det.proximaCuota.numero} (${det.proximaCuota.fechaVencimiento}) por ${p.moneda} ${det.proximaCuota.montoTotal}`
+            : "Al día sin cuotas pendientes",
+          estadoMora: det.tieneAtraso ? `⚠️ Retraso de ${det.diasAtraso} días en la cuota #${det.proximaCuota?.numero}` : "Al día",
+          penalizacionesAplicadas: det.totalPenalizaciones > 0 ? `${p.moneda} ${det.totalPenalizaciones}` : "0",
+        };
+      });
+
       const contexto = `
-        Eres AHORRO, el agente financiero personal de ${nombre}. Sé amable, conciso, usa emojis y tono informal argentino/boliviano.
+        Eres AHORRO, el agente financiero personal e inteligente de ${nombre}. Sé amable, conciso, usa emojis y un tono cercano y profesional boliviano/latinoamericano.
+        
         Aquí están los datos financieros actuales de ${nombre}:
-        Gastos/Ingresos: ${JSON.stringify(gastos)}
-        Préstamos: ${JSON.stringify(prestamos)}
-        Metas: ${JSON.stringify(metas)}
-        Hogar: ${JSON.stringify(hogar)}
-        Responde a la siguiente consulta del usuario: "${input.trim()}"
+        - Usuario: ${nombre}
+        - Gastos/Ingresos personales: ${JSON.stringify(gastos)}
+        - Metas de ahorro: ${JSON.stringify(metas)}
+        - Hermanos registrados en el hogar: ${JSON.stringify(hermanos)}
+        - Gastos del Hogar compartidos: ${JSON.stringify(hogar)}
+        
+        PRÉSTAMOS VIGENTES A PERSONAS CON INTERESES Y PENALIZACIONES:
+        ${JSON.stringify(prestamosInfo, null, 2)}
+
+        REGLAS DE PRÉSTAMOS IMPLEMENTADAS EN EL SISTEMA:
+        1. Modalidad 1: Solo Interés mensual + Capital al final (ej. si a Jose se le prestaron 2000 Bs para 2 meses al 5%, paga 100 Bs el mes 1, y al final en el mes 2 paga 100 Bs de interés + 2000 Bs de capital = 2100 Bs).
+        2. Modalidad 2: Capital + Interés en cada cuota (ej. 4000 Bs a 5 meses al 8% = cada mes paga capital amortizado + interés).
+        3. Si se atrasa en el pago mensual, el usuario puede aplicarle penalizaciones o multas (ej. +50, +100 Bs u otro monto) que se suman al total.
+        4. Si el usuario te pide un recordatorio o mensaje para cobrarle a alguien (como a Jose), redacta un mensaje cortés, claro y respetuoso para WhatsApp con el desglose exacto de capital, interés, fecha límite y saldo pendiente.
+
+        Responde a la siguiente consulta del usuario con exactitud: "${input.trim()}"
       `;
 
       const result = await model.generateContent(contexto);
@@ -727,12 +532,17 @@ function Asistente({ nombre, gastos, prestamos, metas, hogar }: {
       setMsgs(prev => [...prev, { id: Date.now() + 1, role: "bot", text }]);
     } catch (error) {
       console.error(error);
-      setMsgs(prev => [...prev, { id: Date.now() + 1, role: "bot", text: "Ups, tuve un problema conectándome a Gemini. Avisale a soporte." }]);
+      setMsgs(prev => [...prev, { id: Date.now() + 1, role: "bot", text: "Ups, tuve un problema conectándome a Gemini. Revisa tu conexión o clave de API." }]);
     }
     setLoading(false);
   }
 
-  const SUGERENCIAS = ["¿Cómo va mi balance?", "¿Cuánto me deben en Bs?", "Mis metas en dólares", "Dame un consejo financiero"];
+  const SUGERENCIAS = [
+    "¿Cuánto me debe Jose con intereses?",
+    "¿Qué préstamos tienen retraso o mora?",
+    "¿Cuánto me deben mis hermanos del hogar?",
+    "Redacta un cobro para WhatsApp",
+  ];
 
   return (
     <div className="flex flex-col h-[70vh] pb-4">
@@ -770,7 +580,7 @@ function Asistente({ nombre, gastos, prestamos, metas, hogar }: {
       </div>
 
       <div className="flex gap-2 mt-auto">
-        <input type="text" placeholder="Preguntame algo..." value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && enviar()} className="flex-1 bg-[#161b22] border border-[#30363d] rounded-2xl px-4 py-3 text-sm text-[#e6edf3] placeholder:text-[#8b949e] outline-none focus:border-[#f59e0b] transition-colors" />
+        <input type="text" placeholder="Preguntame sobre tus préstamos, intereses o deudores..." value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && enviar()} className="flex-1 bg-[#161b22] border border-[#30363d] rounded-2xl px-4 py-3 text-sm text-[#e6edf3] placeholder:text-[#8b949e] outline-none focus:border-[#f59e0b] transition-colors" />
         <button onClick={enviar} disabled={loading} className="w-12 h-12 rounded-2xl bg-[#f59e0b] text-[#0d1117] font-bold text-lg hover:bg-[#fbbf24] transition-all flex items-center justify-center flex-shrink-0 disabled:opacity-50">↑</button>
       </div>
     </div>
@@ -781,7 +591,7 @@ function Asistente({ nombre, gastos, prestamos, metas, hogar }: {
 
 export default function App() {
   const [usuario, setUsuario] = useState<{ id: string; nombre: string; email: string } | null>(() => {
-    const saved = localStorage.getItem('ahorro_user');
+    const saved = localStorage.getItem("ahorro_user");
     return saved ? JSON.parse(saved) : null;
   });
   const [showUserMenu, setShowUserMenu] = useState(false);
@@ -792,90 +602,312 @@ export default function App() {
   const [metas, setMetas] = useState<Meta[]>([]);
   const [hogar, setHogar] = useState<GastoHogar[]>([]);
 
-  // Cargar datos al iniciar sesión
+  // Hermanos configurados por el usuario
+  const [hermanos, setHermanos] = useState<Hermano[]>(() => {
+    if (typeof window === "undefined") return HERMANOS_DEFAULT;
+    const savedUser = localStorage.getItem("ahorro_user");
+    const userId = savedUser ? JSON.parse(savedUser)?.id : "default";
+    const saved = localStorage.getItem(`ahorro_hermanos_${userId}`);
+    return saved ? JSON.parse(saved) : HERMANOS_DEFAULT;
+  });
+
+  // Cargar hermanos específicos del usuario
   useEffect(() => {
     if (usuario) {
-      localStorage.setItem('ahorro_user', JSON.stringify(usuario));
+      const saved = localStorage.getItem(`ahorro_hermanos_${usuario.id}`);
+      if (saved) {
+        setHermanos(JSON.parse(saved));
+      } else {
+        localStorage.setItem(`ahorro_hermanos_${usuario.id}`, JSON.stringify(HERMANOS_DEFAULT));
+        setHermanos(HERMANOS_DEFAULT);
+      }
+    }
+  }, [usuario]);
+
+  // Cargar datos de Supabase y enriquecer con localStorage
+  useEffect(() => {
+    if (usuario) {
+      localStorage.setItem("ahorro_user", JSON.stringify(usuario));
     } else {
-      localStorage.removeItem('ahorro_user');
+      localStorage.removeItem("ahorro_user");
     }
     
     if (!usuario) return;
     
     async function loadData() {
-      const { data: g } = await supabase.from('gastos').select('*').eq('usuario_id', usuario!.id);
+      const { data: g } = await supabase.from("gastos").select("*").eq("usuario_id", usuario!.id);
       if (g) setGastos(g as Gasto[]);
       
-      const { data: p } = await supabase.from('prestamos').select('*').eq('usuario_id', usuario!.id);
+      const { data: p } = await supabase.from("prestamos").select("*").eq("usuario_id", usuario!.id);
       if (p) {
-        // map db to snake_case if needed, but our schema is snake_case and UI uses camelCase
-        const mappedP = p.map(row => ({
-          ...row, fechaInicio: row.fecha_inicio, cuotasPagadas: row.cuotas_pagadas
-        })) as Prestamo[];
+        const metaKeyP = `ahorro_prestamos_meta_${usuario!.id}`;
+        const metaSavedP = JSON.parse(localStorage.getItem(metaKeyP) || "{}");
+        const mappedP = p.map(row => {
+          const extra = metaSavedP[row.id] || {};
+          return {
+            ...row,
+            fechaInicio: row.fecha_inicio,
+            cuotasPagadas: row.cuotas_pagadas,
+            metodoPago: extra.metodoPago || "solo_interes_capital_final",
+            fechaFin: extra.fechaFin,
+            cronograma: extra.cronograma,
+            penalizaciones: extra.penalizaciones || [],
+            notas: extra.notas,
+          };
+        }) as Prestamo[];
         setPrestamos(mappedP);
       }
 
-      const { data: m } = await supabase.from('metas').select('*').eq('usuario_id', usuario!.id);
+      const { data: m } = await supabase.from("metas").select("*").eq("usuario_id", usuario!.id);
       if (m) setMetas(m as Meta[]);
 
-      const { data: h } = await supabase.from('hogar').select('*').eq('usuario_id', usuario!.id);
+      const { data: h } = await supabase.from("hogar").select("*").eq("usuario_id", usuario!.id);
       if (h) {
-         const mappedH = h.map(row => ({ ...row, pagadoPor: row.pagado_por })) as GastoHogar[];
-         setHogar(mappedH);
+        // Enriquecer registros de hogar con metadatos locales (nombres de hermanos, pagos)
+        const metaKey = `ahorro_hogar_meta_${usuario!.id}`;
+        const metaSaved = JSON.parse(localStorage.getItem(metaKey) || "{}");
+        const mappedH = h.map(row => {
+          const extra = metaSaved[row.id] || {};
+          return {
+            ...row,
+            pagadoPor: row.pagado_por || "Yo",
+            ...extra,
+          };
+        }) as GastoHogar[];
+        setHogar(mappedH);
       }
     }
     loadData();
   }, [usuario]);
 
-  // Wrappers para Operaciones CRUD en Supabase
+  // Gestión de Hermanos
+  const saveHermano = (h: Hermano) => {
+    setHermanos(prev => {
+      const exists = prev.some(x => x.id === h.id);
+      const updated = exists ? prev.map(x => x.id === h.id ? h : x) : [...prev, h];
+      if (usuario) {
+        localStorage.setItem(`ahorro_hermanos_${usuario.id}`, JSON.stringify(updated));
+      }
+      return updated;
+    });
+  };
+
+  const deleteHermano = (id: string) => {
+    setHermanos(prev => {
+      const updated = prev.filter(x => x.id !== id);
+      if (usuario) {
+        localStorage.setItem(`ahorro_hermanos_${usuario.id}`, JSON.stringify(updated));
+      }
+      return updated;
+    });
+  };
+
+  // Operaciones CRUD en Supabase & Local
   const addGasto = async (g: Partial<Gasto>) => {
-    const { data } = await supabase.from('gastos').insert([{ ...g, usuario_id: usuario!.id }]).select().single();
+    const { data } = await supabase.from("gastos").insert([{ ...g, usuario_id: usuario!.id }]).select().single();
     if (data) setGastos(prev => [...prev, data as Gasto]);
   };
   const delGasto = async (id: string) => {
-    await supabase.from('gastos').delete().eq('id', id);
+    await supabase.from("gastos").delete().eq("id", id);
     setGastos(prev => prev.filter(x => x.id !== id));
   };
 
+  // Operaciones de Préstamos
   const addPrestamo = async (p: Partial<Prestamo>) => {
-    const dbPayload = { ...p, fecha_inicio: p.fechaInicio, cuotas_pagadas: p.cuotasPagadas, usuario_id: usuario!.id };
-    delete dbPayload.fechaInicio; delete dbPayload.cuotasPagadas;
-    const { data } = await supabase.from('prestamos').insert([dbPayload]).select().single();
-    if (data) setPrestamos(prev => [...prev, { ...data, fechaInicio: data.fecha_inicio, cuotasPagadas: data.cuotas_pagadas } as Prestamo]);
+    const dbPayload = {
+      deudor: p.deudor,
+      capital: p.capital,
+      interes: p.interes,
+      moneda: p.moneda,
+      fecha_inicio: p.fechaInicio,
+      cuotas: p.cuotas,
+      cuotas_pagadas: p.cuotasPagadas ?? 0,
+      estado: p.estado || "activo",
+      usuario_id: usuario!.id,
+    };
+
+    const { data, error } = await supabase.from("prestamos").insert([dbPayload]).select().single();
+    if (error) {
+      console.error("Error al guardar préstamo en Supabase, guardando localmente:", error);
+      const fallbackP: Prestamo = {
+        id: `p_local_${Date.now()}`,
+        deudor: p.deudor || "Deudor",
+        capital: p.capital || 0,
+        interes: p.interes || 0,
+        fechaInicio: p.fechaInicio || new Date().toISOString().slice(0, 10),
+        fechaFin: p.fechaFin,
+        cuotas: p.cuotas || 1,
+        cuotasPagadas: p.cuotasPagadas || 0,
+        estado: p.estado || "activo",
+        moneda: p.moneda || "Bs",
+        metodoPago: p.metodoPago || "solo_interes_capital_final",
+        cronograma: p.cronograma || [],
+        penalizaciones: p.penalizaciones || [],
+        notas: p.notas || "",
+      };
+      setPrestamos(prev => [...prev, fallbackP]);
+      return;
+    }
+
+    if (data) {
+      const metaKeyP = `ahorro_prestamos_meta_${usuario!.id}`;
+      const metaSavedP = JSON.parse(localStorage.getItem(metaKeyP) || "{}");
+      metaSavedP[data.id] = {
+        metodoPago: p.metodoPago || "solo_interes_capital_final",
+        fechaFin: p.fechaFin,
+        cronograma: p.cronograma,
+        penalizaciones: p.penalizaciones || [],
+        notas: p.notas,
+      };
+      localStorage.setItem(metaKeyP, JSON.stringify(metaSavedP));
+
+      const newPrestamo: Prestamo = {
+        ...data,
+        fechaInicio: data.fecha_inicio,
+        cuotasPagadas: data.cuotas_pagadas,
+        metodoPago: p.metodoPago || "solo_interes_capital_final",
+        fechaFin: p.fechaFin,
+        cronograma: p.cronograma,
+        penalizaciones: p.penalizaciones || [],
+        notas: p.notas,
+      };
+      setPrestamos(prev => [...prev, newPrestamo]);
+    }
   };
+
   const updatePrestamo = async (id: string, updates: Partial<Prestamo>) => {
-    const dbUpdates: any = { ...updates };
-    if (updates.cuotasPagadas !== undefined) { dbUpdates.cuotas_pagadas = updates.cuotasPagadas; delete dbUpdates.cuotasPagadas; }
-    await supabase.from('prestamos').update(dbUpdates).eq('id', id);
+    const dbUpdates: any = {};
+    if (updates.cuotasPagadas !== undefined) dbUpdates.cuotas_pagadas = updates.cuotasPagadas;
+    if (updates.estado !== undefined) dbUpdates.estado = updates.estado;
+    if (updates.capital !== undefined) dbUpdates.capital = updates.capital;
+    if (updates.interes !== undefined) dbUpdates.interes = updates.interes;
+    if (updates.deudor !== undefined) dbUpdates.deudor = updates.deudor;
+
+    if (Object.keys(dbUpdates).length > 0) {
+      await supabase.from("prestamos").update(dbUpdates).eq("id", id);
+    }
+
     setPrestamos(prev => prev.map(x => x.id === id ? { ...x, ...updates } : x));
+
+    if (usuario) {
+      const metaKeyP = `ahorro_prestamos_meta_${usuario.id}`;
+      const metaSavedP = JSON.parse(localStorage.getItem(metaKeyP) || "{}");
+      metaSavedP[id] = {
+        ...(metaSavedP[id] || {}),
+        ...updates,
+      };
+      localStorage.setItem(metaKeyP, JSON.stringify(metaSavedP));
+    }
   };
+
   const delPrestamo = async (id: string) => {
-    await supabase.from('prestamos').delete().eq('id', id);
+    await supabase.from("prestamos").delete().eq("id", id);
     setPrestamos(prev => prev.filter(x => x.id !== id));
+    if (usuario) {
+      const metaKeyP = `ahorro_prestamos_meta_${usuario.id}`;
+      const metaSavedP = JSON.parse(localStorage.getItem(metaKeyP) || "{}");
+      delete metaSavedP[id];
+      localStorage.setItem(metaKeyP, JSON.stringify(metaSavedP));
+    }
   };
 
   const addMeta = async (m: Partial<Meta>) => {
-    const { data } = await supabase.from('metas').insert([{ ...m, usuario_id: usuario!.id }]).select().single();
+    const { data } = await supabase.from("metas").insert([{ ...m, usuario_id: usuario!.id }]).select().single();
     if (data) setMetas(prev => [...prev, data as Meta]);
   };
   const updateMeta = async (id: string, updates: Partial<Meta>) => {
-    await supabase.from('metas').update(updates).eq('id', id);
+    await supabase.from("metas").update(updates).eq("id", id);
     setMetas(prev => prev.map(x => x.id === id ? { ...x, ...updates } : x));
   };
   const delMeta = async (id: string) => {
-    await supabase.from('metas').delete().eq('id', id);
+    await supabase.from("metas").delete().eq("id", id);
     setMetas(prev => prev.filter(x => x.id !== id));
   };
 
+  // Operaciones de Hogar sincronizadas con Supabase + Enriquecimiento local
   const addHogar = async (h: Partial<GastoHogar>) => {
-    const dbPayload = { ...h, pagado_por: h.pagadoPor, usuario_id: usuario!.id };
-    delete dbPayload.pagadoPor;
-    const { data } = await supabase.from('hogar').insert([dbPayload]).select().single();
-    if (data) setHogar(prev => [...prev, { ...data, pagadoPor: data.pagado_por } as GastoHogar]);
+    const dbPayload = {
+      fecha: h.fecha,
+      descripcion: h.descripcion,
+      monto: h.monto,
+      moneda: h.moneda,
+      categoria: h.categoria,
+      dividir: h.dividir ?? false,
+      hermanos: h.hermanos ?? 0,
+      pagado_por: h.pagadoPor || "Yo",
+      usuario_id: usuario!.id,
+    };
+
+    const { data, error } = await supabase.from("hogar").insert([dbPayload]).select().single();
+    if (error) {
+      console.error("Error al guardar compra de hogar:", error);
+      const fallbackItem: GastoHogar = {
+        id: `h_local_${Date.now()}`,
+        fecha: h.fecha || new Date().toISOString().slice(0, 10),
+        descripcion: h.descripcion || "Compra Hogar",
+        monto: h.monto || 0,
+        moneda: h.moneda || "Bs",
+        categoria: h.categoria || "otro",
+        dividir: h.dividir ?? true,
+        hermanos: h.hermanos || 0,
+        pagadoPor: h.pagadoPor || "Yo",
+        hermanosNombres: h.hermanosNombres,
+        cuotaPorPersona: h.cuotaPorPersona,
+        esRedondeado: h.esRedondeado,
+        montoExacto: h.montoExacto,
+        pagosRegistrados: h.pagosRegistrados || {},
+      };
+      setHogar(prev => [...prev, fallbackItem]);
+      return;
+    }
+
+    if (data) {
+      const metaKey = `ahorro_hogar_meta_${usuario!.id}`;
+      const metaSaved = JSON.parse(localStorage.getItem(metaKey) || "{}");
+      metaSaved[data.id] = {
+        hermanosNombres: h.hermanosNombres,
+        cuotaPorPersona: h.cuotaPorPersona,
+        esRedondeado: h.esRedondeado,
+        montoExacto: h.montoExacto,
+        pagosRegistrados: h.pagosRegistrados || {},
+      };
+      localStorage.setItem(metaKey, JSON.stringify(metaSaved));
+
+      const newGastoHogar: GastoHogar = {
+        ...data,
+        pagadoPor: data.pagado_por,
+        hermanosNombres: h.hermanosNombres,
+        cuotaPorPersona: h.cuotaPorPersona,
+        esRedondeado: h.esRedondeado,
+        montoExacto: h.montoExacto,
+        pagosRegistrados: h.pagosRegistrados || {},
+      };
+      setHogar(prev => [...prev, newGastoHogar]);
+    }
   };
+
+  const updateHogar = (id: string, updates: Partial<GastoHogar>) => {
+    setHogar(prev => prev.map(x => x.id === id ? { ...x, ...updates } : x));
+    if (usuario) {
+      const metaKey = `ahorro_hogar_meta_${usuario.id}`;
+      const metaSaved = JSON.parse(localStorage.getItem(metaKey) || "{}");
+      metaSaved[id] = {
+        ...(metaSaved[id] || {}),
+        ...updates,
+      };
+      localStorage.setItem(metaKey, JSON.stringify(metaSaved));
+    }
+  };
+
   const delHogar = async (id: string) => {
-    await supabase.from('hogar').delete().eq('id', id);
+    await supabase.from("hogar").delete().eq("id", id);
     setHogar(prev => prev.filter(x => x.id !== id));
+    if (usuario) {
+      const metaKey = `ahorro_hogar_meta_${usuario.id}`;
+      const metaSaved = JSON.parse(localStorage.getItem(metaKey) || "{}");
+      delete metaSaved[id];
+      localStorage.setItem(metaKey, JSON.stringify(metaSaved));
+    }
   };
 
   if (!usuario) {
@@ -885,21 +917,22 @@ export default function App() {
   const TABS: { id: Tab; label: string; emoji: string }[] = [
     { id: "inicio", label: "Inicio", emoji: "🏠" },
     { id: "gastos", label: "Gastos", emoji: "💸" },
-    { id: "hogar", label: "Hogar", emoji: "🏡" },
+    { id: "hogar", label: "Hogar & Hermanos", emoji: "🏡" },
     { id: "prestamos", label: "Préstamos", emoji: "🤝" },
     { id: "metas", label: "Metas", emoji: "🎯" },
-    { id: "asistente", label: "AHORRO", emoji: "🤖" },
+    { id: "asistente", label: "AHORRO AI", emoji: "🤖" },
   ];
 
   return (
     <div className="min-h-screen bg-[#0d1117] flex justify-center">
       <div className="w-full max-w-md flex flex-col min-h-screen">
+        {/* Header Superior */}
         <div className="flex items-center justify-between px-4 pt-6 pb-4 flex-shrink-0">
           <div>
             <h1 className="font-display font-extrabold text-xl text-[#e6edf3] tracking-tight">
               Agente <span className="text-[#f59e0b]">AHORRO-MES</span>
             </h1>
-            <p className="text-xs text-[#8b949e] font-mono mt-0.5">{usuario.nombre} · Sep 2026</p>
+            <p className="text-xs text-[#8b949e] font-mono mt-0.5">{usuario.nombre} · Finanzas Inteligentes</p>
           </div>
           <div className="relative">
             <button onClick={() => setShowUserMenu(!showUserMenu)} className="w-10 h-10 rounded-full bg-[#161b22] border border-[#30363d] flex items-center justify-center hover:border-[#f59e0b] transition-colors relative">
@@ -919,6 +952,7 @@ export default function App() {
           </div>
         </div>
 
+        {/* Barra de Pestañas */}
         <div className="flex gap-1.5 px-4 mb-4 overflow-x-auto">
           {TABS.map(t => (
             <button key={t.id} onClick={() => setTab(t.id)} className={`flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-display font-semibold transition-all ${tab === t.id ? "bg-[#f59e0b] text-[#0d1117]" : "bg-[#161b22] text-[#8b949e] border border-[#30363d]"}`}>
@@ -927,13 +961,51 @@ export default function App() {
           ))}
         </div>
 
+        {/* Contenido de la Pestaña Activa */}
         <div className="flex-1 overflow-y-auto px-4 pb-6">
-          {tab === "inicio" && <Inicio gastos={gastos} prestamos={prestamos} metas={metas} hogar={hogar} nombre={usuario.nombre} />}
+          {tab === "inicio" && (
+            <Inicio
+              gastos={gastos}
+              prestamos={prestamos}
+              metas={metas}
+              hogar={hogar}
+              hermanos={hermanos}
+              nombre={usuario.nombre}
+              onNavigateTab={setTab}
+            />
+          )}
           {tab === "gastos" && <Gastos gastos={gastos} onAdd={addGasto} onDelete={delGasto} />}
-          {tab === "hogar" && <Hogar hogar={hogar} onAdd={addHogar} onDelete={delHogar} />}
-          {tab === "prestamos" && <Prestamos prestamos={prestamos} onAdd={addPrestamo} onUpdate={updatePrestamo} onDelete={delPrestamo} />}
+          {tab === "hogar" && (
+            <HogarTab
+              hogar={hogar}
+              hermanos={hermanos}
+              usuarioNombre={usuario.nombre}
+              onAdd={addHogar}
+              onDelete={delHogar}
+              onUpdateGasto={updateHogar}
+              onSaveHermano={saveHermano}
+              onDeleteHermano={deleteHermano}
+            />
+          )}
+          {tab === "prestamos" && (
+            <PrestamosTab
+              prestamos={prestamos}
+              onAdd={addPrestamo}
+              onUpdate={updatePrestamo}
+              onDelete={delPrestamo}
+            />
+          )}
           {tab === "metas" && <Metas metas={metas} onAdd={addMeta} onUpdate={updateMeta} onDelete={delMeta} />}
-          {tab === "asistente" && <Asistente nombre={usuario.nombre} gastos={gastos} prestamos={prestamos} metas={metas} hogar={hogar} />}
+          {tab === "asistente" && (
+            <Asistente
+              nombre={usuario.nombre}
+              gastos={gastos}
+              prestamos={prestamos}
+              metas={metas}
+              hogar={hogar}
+              hermanos={hermanos}
+            />
+          )}
         </div>
       </div>
     </div>
