@@ -3,6 +3,7 @@ import { Prestamo, CuotaCronograma, MetodoPagoPrestamo, Moneda, PenalizacionPres
 import {
   sumarMeses,
   formatFecha,
+  formatMesCompleto,
   generarCronogramaInicial,
   calcularDetallesPrestamo,
   generarMensajeCobroPrestamo,
@@ -21,19 +22,28 @@ export default function PrestamosTab({
   onAdd,
   onUpdate,
   onDelete,
-  onConsultarIA,
 }: Props) {
   const [filtro, setFiltro] = useState<"activos" | "atrasados" | "pagados">("activos");
   const [showForm, setShowForm] = useState(false);
   const [expandidoId, setExpandidoId] = useState<string | null>(null);
   const [copiadoId, setCopiadoId] = useState<string | null>(null);
 
+  // Modal de Cobro / Registro de Pago Individual
+  const [cobrarModal, setCobrarModal] = useState<{
+    prestamo: Prestamo;
+    cuota?: CuotaCronograma;
+    modo: "cuota_especifica" | "cobro_rapido";
+  } | null>(null);
+  const [cuotaSeleccionadaNum, setCuotaSeleccionadaNum] = useState<number | null>(null);
+  const [montoACobrar, setMontoACobrar] = useState<string>("");
+  const [fechaCobro, setFechaCobro] = useState<string>(new Date().toISOString().slice(0, 10));
+
   // Modal de Penalización
   const [penalizarPrestamo, setPenalizarPrestamo] = useState<Prestamo | null>(null);
   const [montoPenalizacion, setMontoPenalizacion] = useState("50");
   const [motivoPenalizacion, setMotivoPenalizacion] = useState("No pagó el interés del mes");
 
-  // Form State
+  // Form State para nuevo préstamo
   const [form, setForm] = useState<{
     deudor: string;
     capital: string;
@@ -130,7 +140,54 @@ export default function PrestamosTab({
     setShowForm(false);
   }
 
-  // Marcar una cuota específica como pagada o desmarcarla
+  // Abrir modal de cobro para una cuota o mes en específico
+  function abrirModalCobrar(p: Prestamo, cuota?: CuotaCronograma) {
+    const det = calcularDetallesPrestamo(p);
+    const targetCuota = cuota || det.proximaCuota || det.cronograma[0];
+    setCobrarModal({
+      prestamo: p,
+      cuota: targetCuota,
+      modo: cuota ? "cuota_especifica" : "cobro_rapido",
+    });
+    setCuotaSeleccionadaNum(targetCuota?.numero || null);
+    setMontoACobrar(targetCuota ? targetCuota.montoTotal.toString() : "");
+    setFechaCobro(new Date().toISOString().slice(0, 10));
+  }
+
+  // Confirmar cobro del mes seleccionado (ej: pagar junio aunque deba enero y febrero)
+  function confirmarCobroMes() {
+    if (!cobrarModal || cuotaSeleccionadaNum === null) return;
+    const p = cobrarModal.prestamo;
+    const det = calcularDetallesPrestamo(p);
+
+    const montoNum = parseFloat(montoACobrar);
+    const nuevoCronograma = det.cronograma.map((c) => {
+      if (c.numero === cuotaSeleccionadaNum) {
+        return {
+          ...c,
+          pagada: true,
+          fechaPago: fechaCobro,
+          montoPagado: !isNaN(montoNum) && montoNum > 0 ? montoNum : c.montoTotal,
+        };
+      }
+      return c;
+    });
+
+    const cuotasPagadasCount = nuevoCronograma.filter((c) => c.pagada).length;
+    // Si ya devolvió todo el capital y no quedan cuotas pendientes
+    const capitalDevuelto = nuevoCronograma.filter((c) => c.pagada).reduce((acc, c) => acc + (c.montoCapital || 0), 0);
+    const todoPagado = cuotasPagadasCount === nuevoCronograma.length && capitalDevuelto >= p.capital;
+
+    onUpdate(p.id, {
+      cronograma: nuevoCronograma,
+      cuotasPagadas: cuotasPagadasCount,
+      estado: todoPagado ? "pagado" : "activo",
+    });
+
+    setCobrarModal(null);
+  }
+
+  // Toggle directo de cuota (rápido)
   function toggleCuotaPagada(p: Prestamo, numCuota: number) {
     const det = calcularDetallesPrestamo(p);
     const nuevoCronograma = det.cronograma.map((c) => {
@@ -140,13 +197,15 @@ export default function PrestamosTab({
           ...c,
           pagada,
           fechaPago: pagada ? new Date().toISOString().slice(0, 10) : undefined,
+          montoPagado: pagada ? c.montoTotal : undefined,
         };
       }
       return c;
     });
 
     const cuotasPagadasCount = nuevoCronograma.filter((c) => c.pagada).length;
-    const todoPagado = cuotasPagadasCount === nuevoCronograma.length;
+    const capitalDevuelto = nuevoCronograma.filter((c) => c.pagada).reduce((acc, c) => acc + (c.montoCapital || 0), 0);
+    const todoPagado = cuotasPagadasCount === nuevoCronograma.length && capitalDevuelto >= p.capital;
 
     onUpdate(p.id, {
       cronograma: nuevoCronograma,
@@ -197,13 +256,13 @@ export default function PrestamosTab({
       const det = calcularDetallesPrestamo(p);
       if (p.moneda === "Bs") {
         acc.capitalBs += p.capital;
-        acc.porCobrarBs += det.saldoPendiente;
+        acc.porCobrarBs += det.saldoPendienteTotal;
         acc.interesesBs += det.totalIntereses;
         acc.penalizacionesBs += det.totalPenalizaciones;
         if (det.tieneAtraso) acc.atrasadosCount++;
       } else {
         acc.capitalUsd += p.capital;
-        acc.porCobrarUsd += det.saldoPendiente;
+        acc.porCobrarUsd += det.saldoPendienteTotal;
         acc.interesesUsd += det.totalIntereses;
         acc.penalizacionesUsd += det.totalPenalizaciones;
         if (det.tieneAtraso) acc.atrasadosCount++;
@@ -268,7 +327,7 @@ export default function PrestamosTab({
             </p>
             {stats.penalizacionesBs > 0 && (
               <p className="text-[10px] text-[#ef4444]">
-                Incluye Bs {stats.penalizacionesBs} en penalizaciones
+                Incluye Bs {stats.penalizacionesBs} en multas por mora
               </p>
             )}
           </div>
@@ -299,75 +358,82 @@ export default function PrestamosTab({
       {/* Botón para Abrir Formulario */}
       <button
         onClick={() => setShowForm(!showForm)}
-        className="w-full py-3 rounded-xl bg-gradient-to-r from-[#14b8a6] to-[#0d9488] text-[#0d1117] font-display font-bold text-sm hover:opacity-95 transition-all shadow-md flex items-center justify-center gap-2"
+        className="w-full py-2.5 rounded-xl border border-dashed border-[#14b8a6]/60 bg-[#14b8a6]/10 text-[#14b8a6] font-display font-bold text-xs flex items-center justify-center gap-2 hover:bg-[#14b8a6]/20 transition-all"
       >
-        <span>{showForm ? "✕" : "+"}</span>
-        <span>{showForm ? "Cancelar nuevo préstamo" : "Nuevo préstamo con intereses"}</span>
+        <span>{showForm ? "✕ Cerrar Formulario" : "+ Prestar Dinero (Nuevo Préstamo)"}</span>
       </button>
 
-      {/* FORMULARIO DE NUEVO PRÉSTAMO */}
+      {/* FORMULARIO AVANZADO */}
       {showForm && (
-        <div className="rounded-2xl p-4 bg-[#161b22] border border-[#14b8a6]/40 shadow-xl space-y-4 animate-fade-in">
-          <div className="flex items-center justify-between pb-2 border-b border-[#30363d]">
-            <p className="text-sm font-display font-bold text-[#e6edf3] flex items-center gap-2">
-              <span>✍️</span> Registrar nuevo préstamo
-            </p>
-            <span className="text-[11px] text-[#14b8a6]">Cálculo automático de intereses</span>
-          </div>
+        <div className="rounded-2xl p-4 bg-[#161b22] border border-[#30363d] space-y-3 animate-fade-in shadow-xl">
+          <h3 className="font-display font-bold text-sm text-[#e6edf3] flex items-center gap-2 border-b border-[#30363d] pb-2">
+            <span>📝</span> Datos del Préstamo e Intereses
+          </h3>
 
+          {/* Nombre del Deudor */}
           <div>
-            <label className="text-xs text-[#8b949e] mb-1 block">¿A quién le prestaste?</label>
+            <label className="text-xs text-[#8b949e] mb-1 block">¿A quién le prestas?:</label>
             <input
               type="text"
-              placeholder="Ej: Jose Mensias Rojas"
+              placeholder="Ej: Jose Antonio Mencias Rojas, Carlos..."
               value={form.deudor}
               onChange={(e) => setForm((f) => ({ ...f, deudor: e.target.value }))}
-              className="w-full bg-[#0d1117] border border-[#30363d] rounded-xl px-3.5 py-2.5 text-sm text-[#e6edf3] placeholder:text-[#8b949e] outline-none focus:border-[#14b8a6]"
-              autoFocus
+              className="w-full bg-[#0d1117] border border-[#30363d] rounded-xl px-3 py-2 text-sm text-[#e6edf3] placeholder:text-[#8b949e] outline-none focus:border-[#14b8a6]"
             />
           </div>
 
-          {/* Monto y Moneda */}
+          {/* Capital y Moneda */}
           <div className="grid grid-cols-3 gap-2">
             <div className="col-span-2">
-              <label className="text-xs text-[#8b949e] mb-1 block">Monto del Capital:</label>
+              <label className="text-xs text-[#8b949e] mb-1 block">Monto prestado (Capital):</label>
               <input
                 type="number"
                 placeholder="Ej: 2000"
                 value={form.capital}
                 onChange={(e) => setForm((f) => ({ ...f, capital: e.target.value }))}
-                className="w-full bg-[#0d1117] border border-[#30363d] rounded-xl px-3.5 py-2.5 text-base font-mono font-bold text-[#e6edf3] placeholder:text-[#8b949e] outline-none focus:border-[#14b8a6]"
+                className="w-full bg-[#0d1117] border border-[#30363d] rounded-xl px-3 py-2 text-sm font-mono text-[#e6edf3] placeholder:text-[#8b949e] outline-none focus:border-[#14b8a6]"
               />
             </div>
             <div>
               <label className="text-xs text-[#8b949e] mb-1 block">Moneda:</label>
-              <select
-                value={form.moneda}
-                onChange={(e) => setForm((f) => ({ ...f, moneda: e.target.value as Moneda }))}
-                className="w-full bg-[#0d1117] border border-[#30363d] rounded-xl px-3 py-2.5 text-sm text-[#e6edf3] outline-none focus:border-[#14b8a6]"
-              >
-                <option value="Bs">Bs</option>
-                <option value="USD">USD</option>
-              </select>
+              <div className="grid grid-cols-2 gap-1">
+                {(["Bs", "USD"] as Moneda[]).map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => setForm((f) => ({ ...f, moneda: m }))}
+                    className={`py-2 rounded-xl text-xs font-bold font-mono transition-all ${
+                      form.moneda === m
+                        ? "bg-[#14b8a6] text-[#0d1117]"
+                        : "bg-[#0d1117] text-[#8b949e] border border-[#30363d]"
+                    }`}
+                  >
+                    {m}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
-          {/* Tasa de Interés */}
+          {/* Tasa de Interés Mensual */}
           <div>
             <div className="flex items-center justify-between mb-1">
-              <label className="text-xs text-[#8b949e]">Tasa de interés mensual (%):</label>
-              <span className="text-xs font-mono font-bold text-[#f59e0b]">{form.interes}% al mes</span>
+              <label className="text-xs text-[#8b949e]">Tasa de Interés mensual:</label>
+              <span className="text-xs font-mono font-bold text-[#f59e0b]">
+                {form.interes}% mensual
+              </span>
             </div>
-            <div className="flex gap-1.5 mb-2">
+            {/* Atajos rápidos para % */}
+            <div className="grid grid-cols-6 gap-1 mb-2">
               {["5", "8", "10", "12", "15", "20"].map((pct) => (
                 <button
                   key={pct}
                   type="button"
                   onClick={() => setForm((f) => ({ ...f, interes: pct }))}
-                  className={`flex-1 py-1.5 rounded-lg text-xs font-mono font-bold transition-all ${
+                  className={`py-1.5 rounded-lg text-xs font-mono font-bold transition-all ${
                     form.interes === pct
                       ? "bg-[#f59e0b] text-[#0d1117]"
-                      : "bg-[#0d1117] border border-[#30363d] text-[#8b949e] hover:text-[#e6edf3]"
+                      : "bg-[#0d1117] border border-[#30363d] text-[#8b949e]"
                   }`}
                 >
                   {pct}%
@@ -376,14 +442,14 @@ export default function PrestamosTab({
             </div>
             <input
               type="number"
-              placeholder="O escribe otro porcentaje %"
+              placeholder="O escribe otro porcentaje (ej: 7.5)"
               value={form.interes}
               onChange={(e) => setForm((f) => ({ ...f, interes: e.target.value }))}
               className="w-full bg-[#0d1117] border border-[#30363d] rounded-xl px-3 py-2 text-xs font-mono text-[#e6edf3] placeholder:text-[#8b949e] outline-none focus:border-[#14b8a6]"
             />
           </div>
 
-          {/* Modalidad de Pago (Selector Crítico solicitado por el usuario) */}
+          {/* Modalidad de Pago */}
           <div className="rounded-xl p-3 bg-[#0d1117] border border-[#30363d] space-y-2.5">
             <label className="text-xs font-semibold text-[#e6edf3] block">
               ¿Cómo debe pagar este préstamo?
@@ -409,7 +475,7 @@ export default function PrestamosTab({
                   1. Paga solo el interés cada mes + Todo el capital al final
                 </p>
                 <p className="text-[11px] text-[#8b949e] mt-0.5">
-                  Cada mes paga el interés acordado. En el último mes devuelve el interés más todo el capital prestado (Eje: Jose paga 100 Bs el mes 1, y 2100 Bs el mes 2).
+                  Cada mes paga el interés acordado. En el último mes devuelve el interés más todo el capital prestado (Ej: Jose paga 200 Bs cada mes, y al final 2.200 Bs).
                 </p>
               </div>
             </label>
@@ -434,7 +500,7 @@ export default function PrestamosTab({
                   2. Paga Capital + Interés en cada cuota mensual
                 </p>
                 <p className="text-[11px] text-[#8b949e] mt-0.5">
-                  Cada mes se divide una parte del capital más el interés (Eje: 4000 Bs para 5 meses al 8% = paga 1120 Bs cada mes).
+                  Cada mes se divide una parte del capital más el interés (Ej: 4.000 Bs para 5 meses al 8% = paga 1.120 Bs cada mes).
                 </p>
               </div>
             </label>
@@ -451,13 +517,13 @@ export default function PrestamosTab({
               >
                 {[1, 2, 3, 4, 5, 6, 8, 10, 12, 18, 24].map((n) => (
                   <option key={n} value={n}>
-                    {n} {n === 1 ? "mes (1 cuota)" : `meses (${n} cuotas)`}
+                    {n} {n === 1 ? "mes (1 pago)" : `meses (${n} pagos)`}
                   </option>
                 ))}
               </select>
             </div>
             <div>
-              <label className="text-xs text-[#8b949e] mb-1 block">Fecha de entrega:</label>
+              <label className="text-xs text-[#8b949e] mb-1 block">Fecha de inicio:</label>
               <input
                 type="date"
                 value={form.fechaInicio}
@@ -467,55 +533,55 @@ export default function PrestamosTab({
             </div>
           </div>
 
-          <div>
-            <label className="text-xs text-[#8b949e] mb-1 block">
-              Fecha final acordada para devolver todo:
-            </label>
-            <input
-              type="date"
-              value={form.fechaFin}
-              onChange={(e) => setForm((f) => ({ ...f, fechaFin: e.target.value }))}
-              className="w-full bg-[#0d1117] border border-[#30363d] rounded-xl px-3 py-2 text-xs font-mono text-[#e6edf3] outline-none focus:border-[#14b8a6]"
-            />
+          {/* Fecha Final Acordada Calculada */}
+          <div className="p-2.5 rounded-xl bg-[#0d1117] border border-[#30363d] flex items-center justify-between text-xs">
+            <span className="text-[#8b949e]">📅 Fecha final de devolución total:</span>
+            <span className="font-mono font-bold text-[#14b8a6]">
+              {formatFecha(form.fechaFin)}
+            </span>
           </div>
 
-          {/* Previsualización en Vivo de Cuotas */}
-          {capitalNum > 0 && cronogramaPreview.length > 0 && (
-            <div className="p-3.5 rounded-xl bg-gradient-to-br from-[#113a37] to-[#0d1117] border border-[#14b8a6]/40 space-y-2">
+          {/* Resumen en Vivo del Cronograma */}
+          {capitalNum > 0 && (
+            <div className="rounded-xl p-3 bg-[#0d1117]/80 border border-[#14b8a6]/30 space-y-2">
               <div className="flex items-center justify-between text-xs">
-                <span className="text-[#8b949e]">Simulación de cobros:</span>
-                <span className="font-mono text-[#2dd4bf] font-bold">
-                  Total a recuperar: {form.moneda} {totalEsperadoEstimado.toLocaleString("es-BO")}
+                <span className="font-display font-semibold text-[#2dd4bf]">
+                  📊 Resumen estimado del cálculo:
+                </span>
+                <span className="font-mono text-[11px] text-[#8b949e]">
+                  {cuotasNum} cuotas
                 </span>
               </div>
-
-              <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
-                {cronogramaPreview.map((c) => (
-                  <div
-                    key={c.numero}
-                    className="flex items-center justify-between p-2 rounded-lg bg-[#161b22] text-xs"
-                  >
-                    <div>
-                      <span className="font-semibold text-[#e6edf3]">
-                        Mes {c.numero} ({formatFecha(c.fechaVencimiento)}):
-                      </span>
-                      <p className="text-[10px] text-[#8b949e]">
-                        {form.metodoPago === "solo_interes_capital_final"
-                          ? c.numero === cronogramaPreview.length
-                            ? `Capital: ${c.montoCapital} + Interés: ${c.montoInteres}`
-                            : `Solo Interés: ${c.montoInteres}`
-                          : `Capital: ${c.montoCapital} + Interés: ${c.montoInteres}`}
-                      </p>
-                    </div>
-                    <span className="font-mono font-bold text-[#14b8a6]">
-                      {form.moneda} {c.montoTotal.toLocaleString("es-BO")}
-                    </span>
-                  </div>
-                ))}
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                <div className="p-2 rounded-lg bg-[#161b22] border border-[#30363d]">
+                  <p className="text-[10px] text-[#8b949e]">Ganancia en Intereses:</p>
+                  <p className="font-mono font-bold text-[#f59e0b]">
+                    +{form.moneda} {totalInteresesEstimados.toLocaleString("es-BO")}
+                  </p>
+                </div>
+                <div className="p-2 rounded-lg bg-[#161b22] border border-[#30363d]">
+                  <p className="text-[10px] text-[#8b949e]">Total a Recibir:</p>
+                  <p className="font-mono font-bold text-[#14b8a6]">
+                    {form.moneda} {totalEsperadoEstimado.toLocaleString("es-BO")}
+                  </p>
+                </div>
               </div>
             </div>
           )}
 
+          {/* Notas */}
+          <div>
+            <label className="text-xs text-[#8b949e] mb-1 block">Notas / Condiciones acordadas:</label>
+            <input
+              type="text"
+              placeholder="Ej: Si no paga al mes se suma multa de 50 Bs..."
+              value={form.notas}
+              onChange={(e) => setForm((f) => ({ ...f, notas: e.target.value }))}
+              className="w-full bg-[#0d1117] border border-[#30363d] rounded-xl px-3 py-2 text-xs text-[#e6edf3] placeholder:text-[#8b949e] outline-none focus:border-[#14b8a6]"
+            />
+          </div>
+
+          {/* Botón Guardar */}
           <button
             onClick={guardarNuevoPrestamo}
             disabled={!form.deudor.trim() || !form.capital || capitalNum <= 0}
@@ -545,13 +611,13 @@ export default function PrestamosTab({
               {/* Header de la tarjeta */}
               <div className="flex items-start justify-between">
                 <div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <h3 className="font-display font-bold text-base text-[#e6edf3]">
                       {p.deudor}
                     </h3>
                     {det.tieneAtraso ? (
                       <span className="px-2 py-0.5 rounded-full bg-[#ef4444]/20 border border-[#ef4444]/40 text-[10px] text-[#ef4444] font-bold">
-                        ⚠️ Atraso ({det.diasAtraso} días)
+                        ⚠️ Atraso ({det.diasAtraso} días) · {det.cuotasVencidasCount} meses vencidos
                       </span>
                     ) : p.estado === "pagado" ? (
                       <span className="px-2 py-0.5 rounded-full bg-[#22c55e]/20 border border-[#22c55e]/40 text-[10px] text-[#22c55e] font-bold">
@@ -564,10 +630,10 @@ export default function PrestamosTab({
                     )}
                   </div>
                   <p className="text-xs text-[#8b949e] mt-0.5">
-                    Capital: <strong className="text-[#e6edf3]">{symbol} {p.capital.toLocaleString("es-BO")}</strong> · Tasa: <span className="text-[#f59e0b] font-mono font-bold">{p.interes}%</span> mes
+                    Capital original: <strong className="text-[#e6edf3]">{symbol} {p.capital.toLocaleString("es-BO")}</strong> · Tasa: <span className="text-[#f59e0b] font-mono font-bold">{p.interes}%</span> mes
                   </p>
                   <p className="text-[11px] text-[#8b949e]">
-                    Vence: {formatFecha(det.fechaFinal)} ({p.cuotas} meses) ·{" "}
+                    Vence: {formatFecha(det.fechaFinal)} ({p.cuotas} meses pactados) ·{" "}
                     <span className="text-[#14b8a6]">
                       {p.metodoPago === "solo_interes_capital_final"
                         ? "Interés mensual + Capital final"
@@ -587,12 +653,12 @@ export default function PrestamosTab({
                 </div>
               </div>
 
-              {/* Métricas clave */}
+              {/* Métricas clave con desglose exacto */}
               <div className="grid grid-cols-3 gap-2 text-center">
-                <div className="rounded-xl p-2 bg-[#0d1117] border border-[#30363d]/60">
-                  <p className="text-[10px] text-[#8b949e]">Pendiente</p>
-                  <p className="font-mono text-xs font-bold text-[#f59e0b]">
-                    {symbol} {det.saldoPendiente.toLocaleString("es-BO")}
+                <div className="rounded-xl p-2 bg-[#0d1117] border border-[#ef4444]/40">
+                  <p className="text-[10px] text-[#ef4444] font-semibold">Debes cobrar HOY</p>
+                  <p className="font-mono text-xs font-bold text-[#ef4444]">
+                    {symbol} {det.deudaVencidaTotal.toLocaleString("es-BO")}
                   </p>
                 </div>
                 <div className="rounded-xl p-2 bg-[#0d1117] border border-[#30363d]/60">
@@ -602,9 +668,9 @@ export default function PrestamosTab({
                   </p>
                 </div>
                 <div className="rounded-xl p-2 bg-[#0d1117] border border-[#30363d]/60">
-                  <p className="text-[10px] text-[#8b949e]">Cuotas</p>
-                  <p className="font-mono text-xs font-bold text-[#14b8a6]">
-                    {det.cuotasPagadasCount} / {det.totalCuotas}
+                  <p className="text-[10px] text-[#8b949e]">Saldo Total</p>
+                  <p className="font-mono text-xs font-bold text-[#f59e0b]">
+                    {symbol} {det.saldoPendienteTotal.toLocaleString("es-BO")}
                   </p>
                 </div>
               </div>
@@ -621,29 +687,25 @@ export default function PrestamosTab({
                 </div>
               )}
 
-              {/* Próximo cobro destacado si está activo */}
-              {p.estado === "activo" && det.proximaCuota && (
-                <div
-                  className={`p-3 rounded-xl border flex items-center justify-between text-xs ${
-                    det.tieneAtraso
-                      ? "bg-[#ef4444]/15 border-[#ef4444]/40 text-[#ef4444]"
-                      : "bg-[#0d1117] border-[#14b8a6]/40 text-[#e6edf3]"
-                  }`}
-                >
-                  <div>
-                    <p className="font-bold">
-                      Próxima Cuota #{det.proximaCuota.numero}: {symbol} {det.proximaCuota.montoTotal.toLocaleString("es-BO")}
+              {/* Botón Destacado: COBRAR MES / CUOTA (El usuario solicitó cobrar un interés específico) */}
+              {p.estado === "activo" && (
+                <div className="p-3 rounded-xl bg-[#0d1117] border border-[#14b8a6]/40 flex items-center justify-between gap-3">
+                  <div className="text-xs">
+                    <p className="font-bold text-[#e6edf3] flex items-center gap-1.5">
+                      <span>💵</span>
+                      <span>Registrar pago de un mes / interés</span>
                     </p>
-                    <p className="text-[11px] opacity-80">
-                      Fecha límite: {formatFecha(det.proximaCuota.fechaVencimiento)}
-                      {det.tieneAtraso && ` (Venció hace ${det.diasAtraso} días)`}
+                    <p className="text-[11px] text-[#8b949e]">
+                      {det.cuotasVencidasCount > 0
+                        ? `${det.cuotasVencidasCount} meses vencidos acumulando intereses`
+                        : "Selecciona el mes que vino a pagar el cliente"}
                     </p>
                   </div>
                   <button
-                    onClick={() => toggleCuotaPagada(p, det.proximaCuota!.numero)}
-                    className="px-3 py-1.5 rounded-lg bg-[#22c55e] hover:bg-[#16a34a] text-[#0d1117] font-bold text-xs shadow transition-colors"
+                    onClick={() => abrirModalCobrar(p)}
+                    className="px-3.5 py-2 rounded-xl bg-[#22c55e] hover:bg-[#16a34a] text-[#0d1117] font-bold text-xs shadow-md shadow-[#22c55e]/20 transition-all flex items-center gap-1 shrink-0"
                   >
-                    Cobrado ✓
+                    <span>✓</span> Cobrar Mes
                   </button>
                 </div>
               )}
@@ -654,12 +716,12 @@ export default function PrestamosTab({
                   onClick={() => setPenalizarPrestamo(p)}
                   className="flex-1 py-1.5 px-2.5 rounded-xl bg-[#ef4444]/15 border border-[#ef4444]/30 hover:bg-[#ef4444]/25 text-xs text-[#ef4444] font-semibold flex items-center justify-center gap-1 transition-colors"
                 >
-                  <span>⚠️</span> + Penalización
+                  <span>⚠️</span> + Multa
                 </button>
                 <button
                   onClick={() => copiarWhatsApp(p)}
                   className="flex-1 py-1.5 px-2.5 rounded-xl bg-[#161b22] border border-[#30363d] hover:border-[#22c55e] text-xs text-[#e6edf3] font-semibold flex items-center justify-center gap-1 transition-colors"
-                  title="Copiar mensaje listo para WhatsApp"
+                  title="Copiar mensaje listo para WhatsApp con detalle de meses"
                 >
                   <span>📲</span>
                   <span>{copiadoId === p.id ? "¡Copiado!" : "WhatsApp"}</span>
@@ -668,64 +730,102 @@ export default function PrestamosTab({
                   onClick={() => setExpandidoId(isExpandido ? null : p.id)}
                   className="py-1.5 px-3 rounded-xl bg-[#161b22] border border-[#30363d] hover:border-[#14b8a6] text-xs text-[#14b8a6] font-semibold transition-colors"
                 >
-                  {isExpandido ? "Ocultar ▲" : "Cronograma ▼"}
+                  {isExpandido ? "Ocultar ▲" : `Cronograma (${det.cronograma.length}) ▼`}
                 </button>
               </div>
 
-              {/* CRONOGRAMA EXPANDIBLE CON TODAS LAS FECHAS */}
+              {/* CRONOGRAMA EXPANDIBLE CON CONTROL INDIVIDUAL DE CADA MES */}
               {isExpandido && (
                 <div className="pt-3 border-t border-[#30363d] space-y-3 animate-fade-in">
                   <div className="flex items-center justify-between text-xs">
                     <p className="font-display font-bold text-[#e6edf3] uppercase tracking-wider text-[11px]">
-                      Calendario de cuotas mensuales ({det.cronograma.length})
+                      Meses y Cuotas registradas ({det.cronograma.length})
                     </p>
-                    <span className="text-[10px] text-[#8b949e]">Toca para marcar pagada</span>
+                    <span className="text-[10px] text-[#8b949e]">Haz clic en "Cobrar" para registrar ese mes</span>
                   </div>
 
                   <div className="space-y-1.5">
-                    {det.cronograma.map((c) => (
-                      <div
-                        key={c.numero}
-                        onClick={() => toggleCuotaPagada(p, c.numero)}
-                        className={`flex items-center justify-between p-2.5 rounded-xl border text-xs cursor-pointer transition-all ${
-                          c.pagada
-                            ? "bg-[#22c55e]/10 border-[#22c55e]/30 text-[#4ade80]"
-                            : c.fechaVencimiento < new Date().toISOString().slice(0, 10)
-                            ? "bg-[#ef4444]/10 border-[#ef4444]/30 text-[#f87171]"
-                            : "bg-[#0d1117] border-[#30363d] text-[#e6edf3] hover:border-[#14b8a6]"
-                        }`}
-                      >
-                        <div className="flex items-center gap-2">
-                          <span
-                            className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${
-                              c.pagada
-                                ? "bg-[#22c55e] text-[#0d1117]"
-                                : "bg-[#30363d] text-[#8b949e]"
-                            }`}
-                          >
-                            {c.pagada ? "✓" : c.numero}
-                          </span>
-                          <div>
-                            <p className="font-semibold">
-                              Cuota #{c.numero} · {formatFecha(c.fechaVencimiento)}
-                            </p>
-                            <p className="text-[10px] text-[#8b949e]">
-                              {c.montoCapital > 0 && `Cap: ${symbol} ${c.montoCapital} + `}
-                              Interés: {symbol} {c.montoInteres}
-                            </p>
+                    {det.cronograma.map((c) => {
+                      const esVencida = !c.pagada && c.fechaVencimiento <= new Date().toISOString().slice(0, 10);
+                      const mesNombre = formatMesCompleto(c.fechaVencimiento);
+
+                      return (
+                        <div
+                          key={c.numero}
+                          className={`flex items-center justify-between p-2.5 rounded-xl border text-xs transition-all ${
+                            c.pagada
+                              ? "bg-[#22c55e]/10 border-[#22c55e]/30 text-[#4ade80]"
+                              : esVencida
+                              ? "bg-[#ef4444]/10 border-[#ef4444]/30 text-[#f87171]"
+                              : "bg-[#0d1117] border-[#30363d] text-[#e6edf3]"
+                          }`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => toggleCuotaPagada(p, c.numero)}
+                              className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold transition-all ${
+                                c.pagada
+                                  ? "bg-[#22c55e] text-[#0d1117]"
+                                  : "bg-[#30363d] text-[#8b949e] hover:bg-[#14b8a6] hover:text-[#0d1117]"
+                              }`}
+                              title={c.pagada ? "Marcar como pendiente" : "Marcar como pagada"}
+                            >
+                              {c.pagada ? "✓" : c.numero}
+                            </button>
+                            <div>
+                              <p className="font-semibold flex items-center gap-1.5">
+                                <span>{mesNombre}</span>
+                                {c.esMoraExtra && (
+                                  <span className="text-[9px] px-1.5 py-0.2 rounded bg-[#f59e0b]/20 text-[#f59e0b] border border-[#f59e0b]/30">
+                                    Mora continua
+                                  </span>
+                                )}
+                              </p>
+                              <p className="text-[10px] text-[#8b949e]">
+                                Vence: {formatFecha(c.fechaVencimiento)} ·{" "}
+                                {c.montoCapital > 0 ? (
+                                  <span>Cap: {symbol} {c.montoCapital.toLocaleString("es-BO")} + Int: {symbol} {c.montoInteres}</span>
+                                ) : (
+                                  <span>Solo Interés: {symbol} {c.montoInteres.toLocaleString("es-BO")}</span>
+                                )}
+                              </p>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-3">
+                            <div className="text-right">
+                              <p className="font-mono font-bold">
+                                {symbol} {c.montoTotal.toLocaleString("es-BO")}
+                              </p>
+                              <span className="text-[10px]">
+                                {c.pagada
+                                  ? `Pagado ✓ (${c.fechaPago ? formatFecha(c.fechaPago) : ""})`
+                                  : esVencida
+                                  ? "🔴 Impago"
+                                  : "Pendiente"}
+                              </span>
+                            </div>
+
+                            {!c.pagada ? (
+                              <button
+                                onClick={() => abrirModalCobrar(p, c)}
+                                className="px-2.5 py-1 rounded-lg bg-[#22c55e] hover:bg-[#16a34a] text-[#0d1117] font-bold text-[11px] shadow transition-colors"
+                              >
+                                Cobrar
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => toggleCuotaPagada(p, c.numero)}
+                                className="text-[10px] text-[#8b949e] hover:text-[#ef4444] px-1"
+                                title="Desmarcar pago"
+                              >
+                                Deshacer
+                              </button>
+                            )}
                           </div>
                         </div>
-
-                        <div className="text-right">
-                          <p className="font-mono font-bold">
-                            {symbol} {c.montoTotal.toLocaleString("es-BO")}
-                          </p>
-                          <span className="text-[10px]">
-                            {c.pagada ? "Pagado ✓" : "Pendiente"}
-                          </span>
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
 
                   {/* Listado de penalizaciones registradas */}
@@ -778,11 +878,107 @@ export default function PrestamosTab({
                 : "Aún no tienes préstamos marcados como pagados"}
             </p>
             <p className="text-xs text-[#8b949e]">
-              Registra préstamos con cálculo automático de interés y control de penalizaciones.
+              Registra préstamos con cálculo automático de interés mensual y control de penalizaciones.
             </p>
           </div>
         )}
       </div>
+
+      {/* MODAL DE COBRO ESPECÍFICO DE UN MES / INTERÉS */}
+      {cobrarModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fade-in">
+          <div className="w-full max-w-sm bg-[#161b22] border border-[#14b8a6]/40 rounded-2xl shadow-2xl p-5 space-y-4">
+            <div className="flex items-center justify-between border-b border-[#30363d] pb-2">
+              <div className="flex items-center gap-2">
+                <span className="text-xl">💵</span>
+                <h4 className="font-display font-bold text-sm text-[#e6edf3]">
+                  Registrar Cobro de Cuota / Interés
+                </h4>
+              </div>
+              <button
+                onClick={() => setCobrarModal(null)}
+                className="text-[#8b949e] hover:text-[#e6edf3] text-sm"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div>
+              <p className="text-xs text-[#8b949e]">
+                Deudor: <strong className="text-[#e6edf3]">{cobrarModal.prestamo.deudor}</strong>
+              </p>
+            </div>
+
+            {/* Selector de qué mes vino a pagar (Ej: junio, aunque deba enero y febrero) */}
+            <div>
+              <label className="text-xs text-[#8b949e] mb-1 block">
+                ¿Qué mes o cuota está pagando?:
+              </label>
+              <select
+                value={cuotaSeleccionadaNum ?? ""}
+                onChange={(e) => {
+                  const num = Number(e.target.value);
+                  setCuotaSeleccionadaNum(num);
+                  const cuota = calcularDetallesPrestamo(cobrarModal.prestamo).cronograma.find(
+                    (c) => c.numero === num
+                  );
+                  if (cuota) setMontoACobrar(cuota.montoTotal.toString());
+                }}
+                className="w-full bg-[#0d1117] border border-[#30363d] rounded-xl px-3 py-2 text-xs text-[#e6edf3] outline-none focus:border-[#14b8a6]"
+              >
+                {calcularDetallesPrestamo(cobrarModal.prestamo).cronograma.map((c) => (
+                  <option key={c.numero} value={c.numero}>
+                    {c.pagada ? "✓ (Ya pagado) " : "🔴 "}
+                    {formatMesCompleto(c.fechaVencimiento)} - {cobrarModal.prestamo.moneda} {c.montoTotal} {c.montoCapital > 0 ? "(Cap+Int)" : "(Solo Int)"}
+                  </option>
+                ))}
+              </select>
+              <p className="text-[10px] text-[#14b8a6] mt-1">
+                💡 Puedes cobrar cualquier mes que el cliente te entregue (ej. Junio), y los meses anteriores (Enero, Febrero) seguirán debiéndose hasta que los pague.
+              </p>
+            </div>
+
+            {/* Monto cobrado */}
+            <div>
+              <label className="text-xs text-[#8b949e] mb-1 block">
+                Monto cobrado ({cobrarModal.prestamo.moneda}):
+              </label>
+              <input
+                type="number"
+                value={montoACobrar}
+                onChange={(e) => setMontoACobrar(e.target.value)}
+                className="w-full bg-[#0d1117] border border-[#30363d] rounded-xl px-3 py-2 text-sm font-mono text-[#e6edf3] outline-none focus:border-[#14b8a6]"
+              />
+            </div>
+
+            {/* Fecha en que se cobró */}
+            <div>
+              <label className="text-xs text-[#8b949e] mb-1 block">Fecha del cobro:</label>
+              <input
+                type="date"
+                value={fechaCobro}
+                onChange={(e) => setFechaCobro(e.target.value)}
+                className="w-full bg-[#0d1117] border border-[#30363d] rounded-xl px-3 py-2 text-xs font-mono text-[#e6edf3] outline-none focus:border-[#14b8a6]"
+              />
+            </div>
+
+            <div className="flex gap-2 pt-1">
+              <button
+                onClick={() => setCobrarModal(null)}
+                className="flex-1 py-2.5 rounded-xl bg-[#30363d] text-xs text-[#8b949e] font-semibold"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={confirmarCobroMes}
+                className="flex-1 py-2.5 rounded-xl bg-[#22c55e] hover:bg-[#16a34a] text-[#0d1117] text-xs font-bold transition-colors shadow-lg"
+              >
+                Guardar Cobro ✓
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* MODAL DE PENALIZACIÓN */}
       {penalizarPrestamo && (

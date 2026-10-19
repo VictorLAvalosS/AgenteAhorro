@@ -23,6 +23,8 @@ export interface CuotaCronograma {
   pagada: boolean;
   fechaPago?: string;
   motivoPenalizacion?: string;
+  montoPagado?: number; // Permite abonos parciales o registro del monto cobrado
+  esMoraExtra?: boolean; // True si es un mes generado automáticamente por mora
 }
 
 export interface PenalizacionPrestamo {
@@ -39,7 +41,7 @@ export interface Prestamo {
   interes: number; // Porcentaje mensual (ej. 5, 8, 10%)
   fechaInicio: string; // YYYY-MM-DD
   fechaFin?: string; // Fecha acordada de devolución total
-  cuotas: number; // Cantidad de meses / cuotas
+  cuotas: number; // Cantidad de meses / cuotas pactadas inicialmente
   cuotasPagadas: number;
   estado: "activo" | "pagado";
   moneda: Moneda;
@@ -58,37 +60,31 @@ export interface Meta {
   emoji: string;
   meta: number;
   ahorrado: number;
-  color: string;
+  fechaFin: string;
   moneda: Moneda;
+}
+
+export interface HermanoHogar {
+  id: string;
+  nombre: string;
+  avatar: string;
+  color: string;
+  activo: boolean;
 }
 
 export interface GastoHogar {
   id: string;
   fecha: string;
-  descripcion: string;
-  monto: number;
-  categoria: "limpieza" | "comida" | "mascotas" | "servicios" | "otro";
-  dividir: boolean;
-  hermanos: number;
-  pagadoPor: string;
+  concepto: string;
+  montoTotal: number;
+  pagadoPor: string; // "Yo" o nombre de hermano
+  hermanosIds: string[]; // IDs de hermanos que comparten el gasto
+  divisionDetalle: {
+    cantidadPersonas: number;
+    montoExacto: number;
+    montoRedondeado: number;
+    reglaAplicada: "entero" | "exacto";
+  };
   moneda: Moneda;
-  hermanosNombres?: string[];
-  cuotaPorPersona?: number;
-  esRedondeado?: boolean;
-  montoExacto?: number;
-  pagosRegistrados?: Record<string, boolean>;
-}
-
-export interface ChatMsg {
-  id: number;
-  role: "user" | "bot";
-  text: string;
-}
-
-export interface Evento {
-  id: number;
-  dia: string;
-  hora: string;
-  titulo: string;
-  tipo: "trabajo" | "estudio" | "salud" | "otro";
+  saldado: boolean;
 }
