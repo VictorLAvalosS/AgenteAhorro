@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { GastoHogar, Moneda } from "../lib/types";
+import { GastoHogar, Moneda, CategoriaHogar } from "../lib/types";
 import { Hermano, calcularCuotaDivision, formatearMontoDivision } from "../lib/hermanos";
 import ModalHermanos from "./ModalHermanos";
 
@@ -14,12 +14,14 @@ interface Props {
   onDeleteHermano: (id: string) => void;
 }
 
-const CATS_HOGAR: { val: GastoHogar["categoria"]; label: string; emoji: string }[] = [
+const CATS_HOGAR: { val: CategoriaHogar; label: string; emoji: string }[] = [
+  { val: "comida", label: "Alimentos / Comida", emoji: "🛒" },
   { val: "limpieza", label: "Limpieza", emoji: "🧴" },
-  { val: "comida", label: "Alimentos", emoji: "🛒" },
-  { val: "mascotas", label: "Mascotas", emoji: "🐕" },
-  { val: "servicios", label: "Servicios", emoji: "💡" },
-  { val: "otro", label: "Otro", emoji: "📦" },
+  { val: "internet", label: "Internet", emoji: "📶" },
+  { val: "streaming", label: "Streaming", emoji: "📺" },
+  { val: "servicios", label: "Luz / Agua / Gas", emoji: "💡" },
+  { val: "mascotas", label: "Comida Perros / Mascotas", emoji: "🐕" },
+  { val: "otro", label: "Otro gasto", emoji: "📦" },
 ];
 
 export default function HogarTab({
@@ -33,7 +35,7 @@ export default function HogarTab({
   onDeleteHermano,
 }: Props) {
   const [vista, setVista] = useState<"gastos" | "cuentas">("gastos");
-  const [seccionFiltro, setSeccionFiltro] = useState<"todos" | "mascotas" | "divididos">("todos");
+  const [seccionFiltro, setSeccionFiltro] = useState<"todos" | "mascotas" | "servicios" | "divididos">("todos");
   const [showForm, setShowForm] = useState(false);
   const [showModalHermanos, setShowModalHermanos] = useState(false);
   const [copiadoId, setCopiadoId] = useState<string | null>(null);
@@ -42,7 +44,7 @@ export default function HogarTab({
   const [form, setForm] = useState<{
     descripcion: string;
     monto: string;
-    categoria: GastoHogar["categoria"];
+    categoria: CategoriaHogar;
     dividir: boolean;
     fecha: string;
     moneda: Moneda;
@@ -60,6 +62,15 @@ export default function HogarTab({
     hermanosSeleccionados: hermanos.map((h) => h.nombre),
     incluirme: true,
   });
+
+  // Helper para obtener la lista de hermanos asignados a una compra (retrocompatibilidad)
+  function obtenerNombresParticipantes(g: GastoHogar): string[] {
+    if (g.hermanosNombres && g.hermanosNombres.length > 0) {
+      return g.hermanosNombres;
+    }
+    // Si no estaban guardados en metadatos, asignar a los hermanos configurados actualmente
+    return hermanos.map((h) => h.nombre);
+  }
 
   // Cálculo en vivo para el formulario según la regla del usuario
   const montoNum = parseFloat(form.monto) || 0;
@@ -114,12 +125,13 @@ export default function HogarTab({
   const lista = hogar
     .filter((g) => {
       if (seccionFiltro === "mascotas") return g.categoria === "mascotas";
+      if (seccionFiltro === "servicios") return g.categoria === "servicios" || g.categoria === "internet" || g.categoria === "streaming";
       if (seccionFiltro === "divididos") return g.dividir;
       return true;
     })
     .sort((a, b) => new Date(b.fecha).getTime() - new Date(a.fecha).getTime());
 
-  // Toggle de pago para un hermano en un gasto
+  // Toggle de pago para un hermano en una compra específica (permite pagar de a poco)
   function togglePagoHermano(gasto: GastoHogar, nombreHermano: string) {
     if (!onUpdateGasto) return;
     const actual = gasto.pagosRegistrados?.[nombreHermano] ?? false;
@@ -135,7 +147,9 @@ export default function HogarTab({
   function saldarHermanoTotal(nombreHermano: string) {
     if (!onUpdateGasto) return;
     hogar.forEach((g) => {
-      if (g.dividir && g.hermanosNombres?.includes(nombreHermano)) {
+      if (!g.dividir) return;
+      const participantes = obtenerNombresParticipantes(g);
+      if (participantes.includes(nombreHermano)) {
         const yaPago = g.pagosRegistrados?.[nombreHermano] ?? false;
         if (!yaPago) {
           const nuevosPagos = {
@@ -155,20 +169,25 @@ export default function HogarTab({
     let pagadoBs = 0;
     let pagadoUsd = 0;
     const itemsPendientes: { gasto: GastoHogar; cuota: number }[] = [];
+    const itemsPagados: { gasto: GastoHogar; cuota: number }[] = [];
 
     hogar.forEach((g) => {
       if (!g.dividir) return;
-      const nombres = g.hermanosNombres && g.hermanosNombres.length > 0
-        ? g.hermanosNombres
-        : hermanos.map((x) => x.nombre); // retrocompatibilidad
+      const participantes = obtenerNombresParticipantes(g);
 
-      if (nombres.includes(h.nombre)) {
+      if (participantes.includes(h.nombre)) {
         // Cuota calculada según la regla de redondeo
-        const totalP = (g.hermanos || nombres.length) + 1;
+        const totalP = (g.hermanos || participantes.length) + 1;
         const calc = g.cuotaPorPersona ?? calcularCuotaDivision(g.monto, totalP, g.moneda).cuotaFinal;
         const yaPago = g.pagosRegistrados?.[h.nombre] ?? false;
 
-        if (g.pagadoPor === "Yo" || g.pagadoPor === usuarioNombre) {
+        // Considerar compras pagadas por "Yo" o por el usuario
+        const pagadoPorMi =
+          !g.pagadoPor ||
+          g.pagadoPor === "Yo" ||
+          g.pagadoPor.toLowerCase() === (usuarioNombre || "").toLowerCase();
+
+        if (pagadoPorMi) {
           if (!yaPago) {
             if (g.moneda === "Bs") debeBs += calc;
             else debeUsd += calc;
@@ -176,6 +195,7 @@ export default function HogarTab({
           } else {
             if (g.moneda === "Bs") pagadoBs += calc;
             else pagadoUsd += calc;
+            itemsPagados.push({ gasto: g, cuota: calc });
           }
         }
       }
@@ -188,6 +208,7 @@ export default function HogarTab({
       pagadoBs,
       pagadoUsd,
       itemsPendientes,
+      itemsPagados,
     };
   });
 
@@ -198,16 +219,34 @@ export default function HogarTab({
   function copiarMensajeCobro(hInfo: (typeof deudasPorHermano)[0]) {
     const lines = [
       `¡Hola ${hInfo.hermano.nombre}! 👋`,
-      `Te paso la cuenta de los gastos compartidos del hogar:`,
-      ...hInfo.itemsPendientes.map(
-        (it) => `• ${it.gasto.descripcion}: ${formatearMontoDivision(it.cuota, it.gasto.moneda)}`
-      ),
-      `-----------------------`,
-      `💰 Total a transferirme: ${formatearMontoDivision(hInfo.debeBs, "Bs")}${
-        hInfo.debeUsd > 0 ? ` + ${formatearMontoDivision(hInfo.debeUsd, "USD")}` : ""
-      }`,
-      `¡Muchas gracias! 🙌`,
+      `Te paso la cuenta detallada de los gastos compartidos del hogar:`,
+      ``,
     ];
+
+    if (hInfo.itemsPendientes.length > 0) {
+      lines.push(`🔴 PENDIENTE POR PAGAR (${hInfo.itemsPendientes.length} compras/servicios):`);
+      hInfo.itemsPendientes.forEach((it) => {
+        lines.push(`  • ${it.gasto.descripcion}: ${formatearMontoDivision(it.cuota, it.gasto.moneda)}`);
+      });
+      lines.push(``);
+    }
+
+    if (hInfo.itemsPagados.length > 0) {
+      lines.push(`✅ YA DESCONTADO / PAGADO:`);
+      hInfo.itemsPagados.forEach((it) => {
+        lines.push(`  ✓ ${it.gasto.descripcion}: ${formatearMontoDivision(it.cuota, it.gasto.moneda)}`);
+      });
+      lines.push(``);
+    }
+
+    lines.push(`═══════════════════════`);
+    lines.push(`💰 TOTAL QUE ME DEBES: ${formatearMontoDivision(hInfo.debeBs, "Bs")}${
+      hInfo.debeUsd > 0 ? ` + ${formatearMontoDivision(hInfo.debeUsd, "USD")}` : ""
+    }`);
+    lines.push(`═══════════════════════`);
+    lines.push(``);
+    lines.push(`¡Muchas gracias! 🙌`);
+
     const texto = lines.join("\n");
     navigator.clipboard.writeText(texto);
     setCopiadoId(hInfo.hermano.id);
@@ -255,12 +294,17 @@ export default function HogarTab({
           </button>
         </div>
 
-        {/* Chips de hermanos con su deuda */}
+        {/* Chips de hermanos con su deuda actualizada */}
         <div className="flex gap-2 overflow-x-auto pt-3 mt-2 border-t border-[#30363d]/50">
           {deudasPorHermano.map((d) => (
             <div
               key={d.hermano.id}
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#0d1117]/60 border border-[#30363d] flex-shrink-0"
+              onClick={() => setVista("cuentas")}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border flex-shrink-0 cursor-pointer transition-all ${
+                d.debeBs > 0
+                  ? "bg-[#f59e0b]/15 border-[#f59e0b]/40"
+                  : "bg-[#0d1117]/60 border-[#30363d]"
+              }`}
             >
               <span className="text-sm">{d.hermano.avatar || "👤"}</span>
               <span className="text-xs text-[#e6edf3] font-medium">{d.hermano.nombre}:</span>
@@ -300,80 +344,133 @@ export default function HogarTab({
         </button>
       </div>
 
-      {/* Botón para abrir el formulario */}
+      {/* Botón para Abrir Formulario */}
       <button
-        onClick={() => setShowForm(!showForm)}
-        className="w-full py-3 rounded-xl bg-gradient-to-r from-[#a855f7] to-[#ec4899] text-white font-display font-bold text-sm hover:opacity-95 transition-all shadow-md flex items-center justify-center gap-2"
+        onClick={() => {
+          if (!showForm) {
+            // Inicializar con los hermanos actuales
+            setForm((f) => ({
+              ...f,
+              hermanosSeleccionados: hermanos.map((h) => h.nombre),
+            }));
+          }
+          setShowForm(!showForm);
+        }}
+        className="w-full py-3 rounded-2xl bg-gradient-to-r from-[#a855f7] to-[#ec4899] text-white font-display font-bold text-sm hover:opacity-95 transition-all shadow-lg flex items-center justify-center gap-2"
       >
-        <span>{showForm ? "✕" : "+"}</span>
-        <span>{showForm ? "Cancelar registro" : "Registrar compra del hogar"}</span>
+        <span>{showForm ? "✕ Cancelar registro" : "+ Registrar compra del hogar"}</span>
       </button>
 
       {/* FORMULARIO DE NUEVA COMPRA */}
       {showForm && (
-        <div className="rounded-2xl p-4 bg-[#161b22] border border-[#a855f7]/40 shadow-xl space-y-4 animate-fade-in">
-          <div className="flex items-center justify-between pb-2 border-b border-[#30363d]">
-            <p className="text-sm font-display font-bold text-[#e6edf3] flex items-center gap-2">
-              <span>🛒</span> Nueva compra para el hogar
-            </p>
-            <span className="text-[11px] text-[#8b949e]">Calculadora con redondeo automático</span>
+        <div className="rounded-2xl p-4 bg-[#161b22] border border-[#30363d] space-y-3.5 animate-fade-in shadow-xl">
+          <div className="flex items-center justify-between border-b border-[#30363d] pb-2">
+            <h4 className="font-display font-bold text-sm text-[#e6edf3] flex items-center gap-2">
+              <span>🛒</span> Nueva Compra o Servicio Compartido
+            </h4>
+            <span className="text-[11px] text-[#8b949e]">Hogar & Familia</span>
           </div>
 
+          {/* Atajos Rápidos de Servicios */}
           <div>
-            <label className="text-xs text-[#8b949e] mb-1 block">¿Qué se compró?</label>
+            <label className="text-xs text-[#8b949e] mb-1.5 block">Atajos rápidos:</label>
+            <div className="flex gap-1.5 overflow-x-auto pb-1">
+              {[
+                { desc: "Papel higiénico", cat: "limpieza", emoji: "🧻" },
+                { desc: "Colino / Pasta dental", cat: "limpieza", emoji: "🧴" },
+                { desc: "Aceite y víveres", cat: "comida", emoji: "🍳" },
+                { desc: "Comida de perros", cat: "mascotas", emoji: "🐕" },
+                { desc: "Internet mensual", cat: "internet", emoji: "📶" },
+                { desc: "Netflix / Streaming", cat: "streaming", emoji: "📺" },
+              ].map((sug) => (
+                <button
+                  key={sug.desc}
+                  type="button"
+                  onClick={() =>
+                    setForm((f) => ({
+                      ...f,
+                      descripcion: sug.desc,
+                      categoria: sug.cat as CategoriaHogar,
+                    }))
+                  }
+                  className="px-2.5 py-1 rounded-lg bg-[#0d1117] border border-[#30363d] hover:border-[#a855f7] text-[11px] text-[#e6edf3] flex items-center gap-1 flex-shrink-0 transition-colors"
+                >
+                  <span>{sug.emoji}</span>
+                  <span>{sug.desc}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Descripción */}
+          <div>
+            <label className="text-xs text-[#8b949e] mb-1 block">¿Qué compraste o pagaste?:</label>
             <input
               type="text"
-              placeholder="Ej: Papel higiénico 4 rollos, Arroz 5kg, Detergente..."
+              placeholder="Ej: Colino, Papel higiénico, Aceite, Internet Tigo, Netflix..."
               value={form.descripcion}
               onChange={(e) => setForm((f) => ({ ...f, descripcion: e.target.value }))}
-              className="w-full bg-[#0d1117] border border-[#30363d] rounded-xl px-3.5 py-2.5 text-sm text-[#e6edf3] placeholder:text-[#8b949e] outline-none focus:border-[#a855f7]"
+              className="w-full bg-[#0d1117] border border-[#30363d] rounded-xl px-3 py-2 text-sm text-[#e6edf3] placeholder:text-[#8b949e] outline-none focus:border-[#a855f7]"
             />
           </div>
 
+          {/* Monto y Moneda */}
           <div className="grid grid-cols-3 gap-2">
             <div className="col-span-2">
-              <label className="text-xs text-[#8b949e] mb-1 block">Monto total:</label>
+              <label className="text-xs text-[#8b949e] mb-1 block">Monto total pagado:</label>
               <input
                 type="number"
-                step="any"
                 placeholder="Ej: 68"
                 value={form.monto}
                 onChange={(e) => setForm((f) => ({ ...f, monto: e.target.value }))}
-                className="w-full bg-[#0d1117] border border-[#30363d] rounded-xl px-3.5 py-2.5 text-base font-mono font-bold text-[#e6edf3] placeholder:text-[#8b949e] outline-none focus:border-[#a855f7]"
+                className="w-full bg-[#0d1117] border border-[#30363d] rounded-xl px-3 py-2 text-sm font-mono text-[#e6edf3] placeholder:text-[#8b949e] outline-none focus:border-[#a855f7]"
               />
             </div>
             <div>
               <label className="text-xs text-[#8b949e] mb-1 block">Moneda:</label>
-              <select
-                value={form.moneda}
-                onChange={(e) => setForm((f) => ({ ...f, moneda: e.target.value as Moneda }))}
-                className="w-full bg-[#0d1117] border border-[#30363d] rounded-xl px-3 py-2.5 text-sm text-[#e6edf3] outline-none focus:border-[#a855f7]"
-              >
-                <option value="Bs">Bs (BOB)</option>
-                <option value="USD">USD ($)</option>
-              </select>
+              <div className="grid grid-cols-2 gap-1">
+                {(["Bs", "USD"] as Moneda[]).map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => setForm((f) => ({ ...f, moneda: m }))}
+                    className={`py-2 rounded-xl text-xs font-bold font-mono transition-all ${
+                      form.moneda === m
+                        ? "bg-[#a855f7] text-white"
+                        : "bg-[#0d1117] text-[#8b949e] border border-[#30363d]"
+                    }`}
+                  >
+                    {m}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
-          {/* Categoría */}
-          <div>
-            <label className="text-xs text-[#8b949e] mb-1 block">Categoría:</label>
-            <div className="grid grid-cols-3 gap-2">
-              {CATS_HOGAR.map((c) => (
-                <button
-                  key={c.val}
-                  type="button"
-                  onClick={() => setForm((f) => ({ ...f, categoria: c.val }))}
-                  className={`py-2 px-2 rounded-xl text-xs font-semibold transition-all flex items-center justify-center gap-1.5 ${
-                    form.categoria === c.val
-                      ? "bg-[#a855f7] text-white shadow-sm"
-                      : "bg-[#0d1117] border border-[#30363d] text-[#8b949e] hover:text-[#e6edf3]"
-                  }`}
-                >
-                  <span>{c.emoji}</span>
-                  <span className="truncate">{c.label}</span>
-                </button>
-              ))}
+          {/* Categoría y Fecha */}
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="text-xs text-[#8b949e] mb-1 block">Categoría:</label>
+              <select
+                value={form.categoria}
+                onChange={(e) => setForm((f) => ({ ...f, categoria: e.target.value as CategoriaHogar }))}
+                className="w-full bg-[#0d1117] border border-[#30363d] rounded-xl px-3 py-2 text-xs text-[#e6edf3] outline-none focus:border-[#a855f7]"
+              >
+                {CATS_HOGAR.map((c) => (
+                  <option key={c.val} value={c.val}>
+                    {c.emoji} {c.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="text-xs text-[#8b949e] mb-1 block">Fecha de compra:</label>
+              <input
+                type="date"
+                value={form.fecha}
+                onChange={(e) => setForm((f) => ({ ...f, fecha: e.target.value }))}
+                className="w-full bg-[#0d1117] border border-[#30363d] rounded-xl px-3 py-2 text-xs font-mono text-[#e6edf3] outline-none focus:border-[#a855f7]"
+              />
             </div>
           </div>
 
@@ -404,7 +501,7 @@ export default function HogarTab({
                 {/* ¿Quién pagó? */}
                 <div>
                   <label className="text-xs text-[#8b949e] mb-1 block">
-                    ¿Quién pagó esta compra con su dinero?
+                    ¿Quién pagó esta compra con su dinero?:
                   </label>
                   <select
                     value={form.pagadoPor}
@@ -457,7 +554,7 @@ export default function HogarTab({
                       }`}
                     >
                       <span>{form.incluirme ? "✓" : "○"}</span>
-                      <span>Yo ({usuarioNombre})</span>
+                      <span>Yo ({usuarioNombre || "Víctor"})</span>
                     </button>
 
                     {/* Chips de hermanos */}
@@ -481,69 +578,36 @@ export default function HogarTab({
                       );
                     })}
                   </div>
+                  <p className="text-[10px] text-[#8b949e] mt-1.5">
+                    💡 Selecciona solo a los hermanos que participan (ej: para alimento de perros, solo 1 hermana y 1 hermano).
+                  </p>
                 </div>
 
-                {/* CALCULADORA INTELIGENTE EN TIEMPO REAL */}
+                {/* Previsualización en Vivo de la Regla de Redondeo */}
                 {montoNum > 0 && numParticipantes > 0 && (
-                  <div className="p-3.5 rounded-xl bg-gradient-to-br from-[#1f1937] to-[#161b22] border border-[#a855f7]/50 space-y-2">
+                  <div className="p-3 rounded-xl bg-[#161b22] border border-[#a855f7]/30 space-y-1">
                     <div className="flex items-center justify-between text-xs">
-                      <span className="text-[#8b949e]">División automática:</span>
+                      <span className="text-[#8b949e]">Cada persona debe aportar:</span>
+                      <span className="font-mono font-bold text-sm text-[#c084fc]">
+                        {form.moneda} {calculoEnVivo.cuotaFinal}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center justify-between text-[11px] pt-1 border-t border-[#30363d]/40">
+                      <span className="text-[#8b949e]">Cálculo matemático:</span>
                       <span className="font-mono text-[#8b949e]">
-                        {form.moneda === "Bs" ? "Bs" : "$"} {montoNum} ÷ {numParticipantes} pers.
+                        {montoNum} ÷ {numParticipantes} = {calculoEnVivo.cuotaExacta.toFixed(4)}...
                       </span>
                     </div>
 
-                    <div className="flex items-baseline justify-between">
-                      <span className="text-xs text-[#e6edf3] font-medium">Cuota por persona:</span>
-                      <div className="text-right">
-                        <span className="font-mono text-xl font-bold text-[#f59e0b]">
-                          {calculoEnVivo.textoFormateado}
-                        </span>
-                        {calculoEnVivo.esRedondeado && (
-                          <p className="text-[10px] text-[#22c55e]">
-                            Exacto: {form.moneda === "Bs" ? "Bs" : "$"} {calculoEnVivo.cuotaExacta.toFixed(2)} → Redondeado a entero
-                          </p>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Badge informativo de la regla */}
-                    <div
-                      className={`p-2 rounded-lg text-[11px] leading-tight flex items-start gap-1.5 ${
-                        calculoEnVivo.esRedondeado
-                          ? "bg-[#f59e0b]/15 text-[#fbbf24] border border-[#f59e0b]/30"
-                          : "bg-[#22c55e]/15 text-[#4ade80] border border-[#22c55e]/30"
-                      }`}
-                    >
-                      <span className="text-sm">
-                        {calculoEnVivo.esRedondeado ? "💡" : "✓"}
-                      </span>
-                      <span>
-                        {calculoEnVivo.esRedondeado
-                          ? `Regla aplicada: Como la división da más de 4 decimales (${calculoEnVivo.cuotaExacta.toFixed(4)}...), se redondea al entero más cercano (${calculoEnVivo.cuotaFinal} ${form.moneda}).`
-                          : `Monto exacto: Tiene ${calculoEnVivo.decimalesDetectados} decimales limpios, se conserva con decimales.`}
-                      </span>
-                    </div>
-
-                    {/* Desglose de quién debe cuánto */}
-                    {form.pagadoPor === "Yo" && form.hermanosSeleccionados.length > 0 && (
-                      <div className="pt-2 border-t border-[#30363d]/60 text-xs space-y-1">
-                        <p className="text-[#8b949e] font-semibold">Resumen de cobro:</p>
-                        {form.hermanosSeleccionados.map((nom) => (
-                          <div key={nom} className="flex justify-between text-[#e6edf3]">
-                            <span>• {nom} te debe:</span>
-                            <span className="font-mono font-bold text-[#a855f7]">
-                              {calculoEnVivo.textoFormateado}
-                            </span>
-                          </div>
-                        ))}
-                        <div className="flex justify-between pt-1 font-bold text-[#22c55e]">
-                          <span>Total que recuperarás:</span>
-                          <span className="font-mono">
-                            {form.moneda === "Bs" ? "Bs" : "$"} {(calculoEnVivo.cuotaFinal * form.hermanosSeleccionados.length).toLocaleString("es-BO")}
-                          </span>
-                        </div>
-                      </div>
+                    {calculoEnVivo.esRedondeado ? (
+                      <p className="text-[10px] text-[#f59e0b] flex items-center gap-1 pt-0.5">
+                        <span>✨</span> Redondeado a entero ({calculoEnVivo.cuotaFinal} {form.moneda}) porque tiene más de 4 decimales.
+                      </p>
+                    ) : (
+                      <p className="text-[10px] text-[#22c55e] flex items-center gap-1 pt-0.5">
+                        <span>✓</span> Mantiene decimales exactos ({calculoEnVivo.cuotaFinal} {form.moneda}).
+                      </p>
                     )}
                   </div>
                 )}
@@ -570,6 +634,7 @@ export default function HogarTab({
               { val: "todos", label: "Todos" },
               { val: "divididos", label: "🤝 Divididos" },
               { val: "mascotas", label: "🐕 Mascotas" },
+              { val: "servicios", label: "📶 Servicios / Net" },
             ].map((f) => (
               <button
                 key={f.val}
@@ -589,10 +654,7 @@ export default function HogarTab({
           <div className="space-y-2.5">
             {lista.map((g) => {
               const catObj = CATS_HOGAR.find((c) => c.val === g.categoria);
-              const nombresParticipantes =
-                g.hermanosNombres && g.hermanosNombres.length > 0
-                  ? g.hermanosNombres
-                  : hermanos.slice(0, g.hermanos || 2).map((h) => h.nombre);
+              const nombresParticipantes = obtenerNombresParticipantes(g);
 
               const totalPers = nombresParticipantes.length + 1;
               const calc = calcularCuotaDivision(g.monto, totalPers, g.moneda);
@@ -649,7 +711,7 @@ export default function HogarTab({
                         )}
                       </div>
 
-                      {/* Chips de estado por cada hermano */}
+                      {/* Chips de estado por cada hermano (Toca para descontar o marcar como pagado) */}
                       <div className="flex flex-wrap gap-1.5 pt-1">
                         {nombresParticipantes.map((nom) => {
                           const pagado = g.pagosRegistrados?.[nom] ?? false;
@@ -659,17 +721,23 @@ export default function HogarTab({
                               key={nom}
                               type="button"
                               onClick={() => togglePagoHermano(g, nom)}
-                              className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-mono transition-all border ${
+                              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-mono transition-all border ${
                                 pagado
                                   ? "bg-[#22c55e]/15 border-[#22c55e]/30 text-[#4ade80]"
                                   : "bg-[#ef4444]/15 border-[#ef4444]/30 text-[#f87171] hover:bg-[#ef4444]/25"
                               }`}
-                              title={pagado ? "Pagado (clic para marcar pendiente)" : "Pendiente (clic para marcar como pagado)"}
+                              title={
+                                pagado
+                                  ? "Ya pagó esta compra (toca para desmarcar)"
+                                  : "Pendiente de pago (toca para descontar / marcar como pagada esta compra)"
+                              }
                             >
                               <span>{hermanoObj?.avatar || "👤"}</span>
                               <span className="font-sans font-medium">{nom}:</span>
                               <span>{cuotaVal} {g.moneda}</span>
-                              <span className="font-bold ml-0.5">{pagado ? "✓" : "⏳"}</span>
+                              <span className="font-bold ml-1 px-1 rounded bg-black/20">
+                                {pagado ? "Pagado ✓" : "Debe ⏳"}
+                              </span>
                             </button>
                           );
                         })}
@@ -756,12 +824,14 @@ export default function HogarTab({
                   </div>
                 </div>
 
-                {/* Compras pendientes de este hermano */}
+                {/* Compras pendientes de este hermano (Permite descontar de a poco) */}
                 {d.itemsPendientes.length > 0 && (
                   <div className="space-y-1.5 pt-2 border-t border-[#30363d]">
-                    <p className="text-[11px] font-display font-semibold text-[#8b949e] uppercase tracking-wider">
-                      Detalle de lo que debe:
-                    </p>
+                    <div className="flex items-center justify-between">
+                      <p className="text-[11px] font-display font-semibold text-[#8b949e] uppercase tracking-wider">
+                        Detalle de compras pendientes (puedes cobrar una por una):
+                      </p>
+                    </div>
                     {d.itemsPendientes.map(({ gasto, cuota }) => (
                       <div
                         key={gasto.id}
@@ -779,13 +849,44 @@ export default function HogarTab({
                           </span>
                           <button
                             onClick={() => togglePagoHermano(gasto, d.hermano.nombre)}
-                            className="px-2 py-0.5 rounded bg-[#22c55e]/20 hover:bg-[#22c55e]/30 text-[#4ade80] text-[11px] font-semibold transition-colors"
+                            className="px-2.5 py-1 rounded-lg bg-[#22c55e] hover:bg-[#16a34a] text-[#0d1117] text-xs font-bold transition-colors shadow"
                           >
-                            Marcar pagado ✓
+                            Descontar ✓
                           </button>
                         </div>
                       </div>
                     ))}
+                  </div>
+                )}
+
+                {/* Compras ya pagadas / descontadas */}
+                {d.itemsPagados.length > 0 && (
+                  <div className="pt-2 border-t border-[#30363d]/40">
+                    <p className="text-[10px] text-[#22c55e] font-semibold uppercase mb-1">
+                      Compras ya saldadas por {d.hermano.nombre}:
+                    </p>
+                    <div className="space-y-1">
+                      {d.itemsPagados.map(({ gasto, cuota }) => (
+                        <div
+                          key={gasto.id}
+                          className="flex items-center justify-between p-1.5 rounded-lg bg-[#0d1117]/50 border border-[#22c55e]/20 text-[11px]"
+                        >
+                          <span className="text-[#8b949e] line-through truncate">{gasto.descripcion}</span>
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-[#22c55e]">
+                              {formatearMontoDivision(cuota, gasto.moneda)}
+                            </span>
+                            <button
+                              onClick={() => togglePagoHermano(gasto, d.hermano.nombre)}
+                              className="text-[10px] text-[#8b949e] hover:text-[#ef4444]"
+                              title="Revertir a pendiente"
+                            >
+                              Deshacer
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 )}
 

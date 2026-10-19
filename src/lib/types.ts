@@ -46,7 +46,7 @@ export interface Prestamo {
   estado: "activo" | "pagado";
   moneda: Moneda;
 
-  // Nuevos campos avanzados para el control exacto de intereses y penalizaciones
+  // Campos avanzados para el control exacto de intereses y penalizaciones
   metodoPago?: MetodoPagoPrestamo;
   penalizaciones?: PenalizacionPrestamo[];
   cronograma?: CuotaCronograma[];
@@ -64,27 +64,36 @@ export interface Meta {
   moneda: Moneda;
 }
 
-export interface HermanoHogar {
-  id: string;
-  nombre: string;
-  avatar: string;
-  color: string;
-  activo: boolean;
+export interface ChatMsg {
+  id: number;
+  role: "bot" | "user";
+  text: string;
 }
+
+export type CategoriaHogar =
+  | "limpieza"
+  | "comida"
+  | "mascotas"
+  | "servicios"
+  | "streaming"
+  | "internet"
+  | "otro";
 
 export interface GastoHogar {
   id: string;
   fecha: string;
-  concepto: string;
-  montoTotal: number;
-  pagadoPor: string; // "Yo" o nombre de hermano
-  hermanosIds: string[]; // IDs de hermanos que comparten el gasto
-  divisionDetalle: {
-    cantidadPersonas: number;
-    montoExacto: number;
-    montoRedondeado: number;
-    reglaAplicada: "entero" | "exacto";
-  };
+  descripcion: string;
+  monto: number;
   moneda: Moneda;
-  saldado: boolean;
+  categoria: CategoriaHogar;
+  dividir: boolean;
+  hermanos: number; // Cantidad de personas con quienes se divide
+  pagadoPor: string; // "Yo" o nombre del usuario/hermano
+
+  // Campos enriquecidos para control por hermano y cobros parciales
+  hermanosNombres?: string[]; // Nombres de hermanos que comparten este gasto
+  cuotaPorPersona?: number; // Monto que debe pagar cada hermano
+  esRedondeado?: boolean;
+  montoExacto?: number;
+  pagosRegistrados?: Record<string, boolean>; // { "Meli": true, "Nayda": false }
 }
